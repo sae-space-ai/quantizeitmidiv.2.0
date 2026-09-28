@@ -24,12 +24,12 @@ import {
   type TranscribedNote,
   type TranscriptionResult,
   type TranscriptionParams,
-} from '../utils/transcription';
+} from '../utils/transcription-enhanced';
 import {
-  generateMusicXmlBlob,
-  validateMusicXml,
+  generateMusicXmlBlobEnhanced as generateMusicXmlBlob,
+  validateMusicXmlEnhanced as validateMusicXml,
   type MusicXmlParams,
-} from '../utils/musicxml';
+} from '../utils/musicxml-enhanced';
 import { Midi } from '@tonejs/midi';
 
 interface AudioTranscriptionPanelProps {
