@@ -1,9 +1,9 @@
 /**
  * QUANTIZE.IT - MIDI Quantizer Pro
- * Main quantization parameters panel.
+ * Main quantization parameters panel with reset and download options.
  */
 
-import { Settings2, Grid3x3, Zap, Wind, Shuffle, CheckSquare } from 'lucide-react';
+import { Settings2, Grid3x3, Zap, Wind, Shuffle, CheckSquare, RotateCcw, Download, FileText } from 'lucide-react';
 import type { QuantizeParams, GridType } from '../types';
 import { getGridOptions } from '../utils/quantizer';
 
@@ -11,11 +11,23 @@ interface QuantizePanelProps {
   params: QuantizeParams;
   onChangeParams: (params: QuantizeParams) => void;
   onQuantize: () => void;
+  onReset: () => void;
+  onDownloadReport?: () => void;
+  onDownloadMidi?: () => void;
   isProcessing: boolean;
   disabled: boolean;
 }
 
-export function QuantizePanel({ params, onChangeParams, onQuantize, isProcessing, disabled }: QuantizePanelProps) {
+export function QuantizePanel({
+  params,
+  onChangeParams,
+  onQuantize,
+  onReset,
+  onDownloadReport,
+  onDownloadMidi,
+  isProcessing,
+  disabled,
+}: QuantizePanelProps) {
   const gridOptions = getGridOptions();
 
   const updateParam = <K extends keyof QuantizeParams>(key: K, value: QuantizeParams[K]) => {
@@ -24,9 +36,19 @@ export function QuantizePanel({ params, onChangeParams, onQuantize, isProcessing
 
   return (
     <div className="bg-gray-800/50 rounded-xl border border-gray-700/50 p-5">
-      <div className="flex items-center gap-2 mb-5">
-        <Settings2 className="w-5 h-5 text-cyan-400" />
-        <h3 className="text-base font-semibold text-white">Quantization Parameters</h3>
+      <div className="flex items-center justify-between mb-5">
+        <div className="flex items-center gap-2">
+          <Settings2 className="w-5 h-5 text-cyan-400" />
+          <h3 className="text-base font-semibold text-white">Quantization Parameters</h3>
+        </div>
+        <button
+          onClick={onReset}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-gray-400 hover:text-white bg-gray-700/50 hover:bg-gray-700 rounded-lg transition-colors"
+          title="Reset to original MIDI"
+        >
+          <RotateCcw className="w-3.5 h-3.5" />
+          Reset
+        </button>
       </div>
 
       <div className="space-y-5">
@@ -183,30 +205,57 @@ export function QuantizePanel({ params, onChangeParams, onQuantize, isProcessing
           </label>
         </div>
 
-        {/* Quantize Button */}
-        <button
-          onClick={onQuantize}
-          disabled={disabled || isProcessing}
-          className={`
-            w-full py-3 px-6 rounded-xl font-semibold text-sm transition-all flex items-center justify-center gap-2
-            ${disabled || isProcessing
-              ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
-              : 'bg-gradient-to-r from-cyan-500 to-blue-600 text-white hover:from-cyan-400 hover:to-blue-500 shadow-lg shadow-cyan-500/25 hover:shadow-cyan-500/40'
-            }
-          `}
-        >
-          {isProcessing ? (
-            <>
-              <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-              Processing...
-            </>
-          ) : (
-            <>
-              <CheckSquare className="w-4 h-4" />
-              Quantize & Download
-            </>
+        {/* Action Buttons */}
+        <div className="space-y-2">
+          {/* Quantize Button */}
+          <button
+            onClick={onQuantize}
+            disabled={disabled || isProcessing}
+            className={`
+              w-full py-3 px-6 rounded-xl font-semibold text-sm transition-all flex items-center justify-center gap-2
+              ${disabled || isProcessing
+                ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
+                : 'bg-gradient-to-r from-cyan-500 to-blue-600 text-white hover:from-cyan-400 hover:to-blue-500 shadow-lg shadow-cyan-500/25 hover:shadow-cyan-500/40'
+              }
+            `}
+          >
+            {isProcessing ? (
+              <>
+                <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                Processing...
+              </>
+            ) : (
+              <>
+                <CheckSquare className="w-4 h-4" />
+                Quantize & Download
+              </>
+            )}
+          </button>
+
+          {/* Secondary Actions */}
+          {(onDownloadMidi || onDownloadReport) && (
+            <div className="grid grid-cols-2 gap-2">
+              {onDownloadMidi && (
+                <button
+                  onClick={onDownloadMidi}
+                  className="flex items-center justify-center gap-2 py-2 px-4 bg-gray-700/50 hover:bg-gray-700 text-gray-300 hover:text-white rounded-lg text-sm transition-colors"
+                >
+                  <Download className="w-4 h-4" />
+                  Download MIDI
+                </button>
+              )}
+              {onDownloadReport && (
+                <button
+                  onClick={onDownloadReport}
+                  className="flex items-center justify-center gap-2 py-2 px-4 bg-gray-700/50 hover:bg-gray-700 text-gray-300 hover:text-white rounded-lg text-sm transition-colors"
+                >
+                  <FileText className="w-4 h-4" />
+                  Download Report
+                </button>
+              )}
+            </div>
           )}
-        </button>
+        </div>
       </div>
     </div>
   );
