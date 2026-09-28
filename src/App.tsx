@@ -18,6 +18,7 @@ import { AiAssistantPanel } from './components/AiAssistantPanel';
 import { ProjectManager } from './components/ProjectManager';
 import { AudioTranscriptionPanel } from './components/AudioTranscriptionPanel';
 import { MusicalStagesPanel } from './components/MusicalStagesPanel';
+import { Player } from './components/Player';
 import {
   loadMidiFile,
   loadMidiFileFromBuffer,
@@ -95,6 +96,10 @@ function App() {
   // Audio transcription panel visibility
   const [showAudioPanel, setShowAudioPanel] = useState(false);
 
+  // Player state
+  const [quantizedBinaryMidi, setQuantizedBinaryMidi] = useState<MidiFile | null>(null);
+  const [trackNames, setTrackNames] = useState<string[]>([]);
+
   // Initialize DB
   useEffect(() => {
     initializeDatabase().catch(err => {
@@ -126,6 +131,10 @@ function App() {
       const tracksWithNotes = info.tracks.filter(t => t.noteCount > 0).map(t => t.index);
       setSelectedTracks(tracksWithNotes);
       setParams(prev => ({ ...prev, ppq: info.ppq }));
+
+      // Extract track names for player
+      setTrackNames(info.tracks.map(t => t.name));
+      setQuantizedBinaryMidi(null);
 
       const snapshot = createMidiSnapshot(loadedMidi, info.name);
       setBeforeSnapshot(snapshot);
@@ -242,11 +251,12 @@ function App() {
             setLastOutputBuffer(result.midiBuffer);
 
             // Re-parse for UI
-            const { midi: freshMidi } = await loadMidiFileFromBuffer(
+            const { midi: freshMidi, binaryMidi: freshBinaryMidi } = await loadMidiFileFromBuffer(
               result.midiBuffer,
               fileInfo.name
             );
             setMidi(freshMidi);
+            setQuantizedBinaryMidi(freshBinaryMidi);
 
             const afterSnap = createMidiSnapshot(freshMidi, fileInfo.name);
             setAfterSnapshot(afterSnap);
@@ -507,6 +517,15 @@ function App() {
               )}
               {binaryTestSuite && <BinaryTestPanel testSuite={binaryTestSuite} />}
               
+              {/* MIDI Player */}
+              {(binaryMidi || quantizedBinaryMidi) && (
+                <Player
+                  originalMidi={binaryMidi}
+                  quantizedMidi={quantizedBinaryMidi}
+                  trackNames={trackNames}
+                />
+              )}
+
               {/* Musical Processing Stages */}
               {binaryMidi && (
                 <MusicalStagesPanel
