@@ -17,6 +17,7 @@ import { ProgressBar } from './components/ProgressBar';
 import { AiAssistantPanel } from './components/AiAssistantPanel';
 import { ProjectManager } from './components/ProjectManager';
 import { AudioTranscriptionPanel } from './components/AudioTranscriptionPanel';
+import { MusicalStagesPanel } from './components/MusicalStagesPanel';
 import {
   loadMidiFile,
   loadMidiFileFromBuffer,
@@ -505,6 +506,19 @@ function App() {
                 <ReportPanel report={lastResult.report} verification={verificationResult} tempoInfo={tempoInfo} />
               )}
               {binaryTestSuite && <BinaryTestPanel testSuite={binaryTestSuite} />}
+              
+              {/* Musical Processing Stages */}
+              {binaryMidi && (
+                <MusicalStagesPanel
+                  midi={binaryMidi}
+                  grid={params.grid}
+                  ppq={params.ppq}
+                  onStatusChange={(message, type) => {
+                    setStatus(message);
+                    setStatusType(type === 'success' ? 'success' : type === 'error' ? 'error' : 'info');
+                  }}
+                />
+              )}
             </div>
 
             {/* Right column */}
