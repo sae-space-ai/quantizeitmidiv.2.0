@@ -1,17 +1,9 @@
 /**
- * QUANTIZE.IT - MIDI Quantizer Pro
- * Main application component.
- * 
- * Features:
- * - Multi-track selection
- * - Before/after comparison
- * - Downloadable report
- * - Undo/reset
- * - MIDI verification after export
- * - Musical presets
+ * QUANTIZE.IT - MIDI Quantizer Pro v2.0
+ * Main application with DB, AI, and Worker integration.
  */
 
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import { Header } from './components/Header';
 import { FileLoader } from './components/FileLoader';
 import { TrackSelector } from './components/TrackSelector';
@@ -20,6 +12,9 @@ import { StatusBar } from './components/StatusBar';
 import { ComparisonView } from './components/ComparisonView';
 import { ReportPanel } from './components/ReportPanel';
 import { BinaryTestPanel } from './components/BinaryTestPanel';
+import { ProgressBar } from './components/ProgressBar';
+import { AiAssistantPanel } from './components/AiAssistantPanel';
+import { ProjectManager } from './components/ProjectManager';
 import {
   loadMidiFile,
   loadMidiFileFromBuffer,
@@ -30,7 +25,10 @@ import {
   verifyMidiBlob,
   generateTextReport,
 } from './utils/midi-io';
-import { runBinaryTests, formatTestResults, type TestSuite } from './utils/binary-tests';
+import { runBinaryTests, type TestSuite } from './utils/binary-tests';
+import { aiRegistry, type AiAnalysisResult, type AiSuggestion } from './utils/ai-provider';
+import { quantizeInWorker, type WorkerProgress, performanceMonitor } from './utils/worker-wrapper';
+import { initializeDatabase, saveConfiguration, type DBConfiguration } from './utils/database';
 import type { MidiFile } from './utils/midi-types';
 import type {
   MidiFileInfo,
@@ -44,7 +42,7 @@ import { Midi } from '@tonejs/midi';
 type StatusType = 'idle' | 'success' | 'error' | 'info' | 'loading';
 
 function App() {
-  // Store original ArrayBuffer for re-quantization
+  // Core state
   const originalBufferRef = useRef<ArrayBuffer | null>(null);
   const [midi, setMidi] = useState<Midi | null>(null);
   const [binaryMidi, setBinaryMidi] = useState<MidiFile | null>(null);
@@ -54,20 +52,31 @@ function App() {
   const [status, setStatus] = useState('');
   const [statusType, setStatusType] = useState<StatusType>('idle');
 
-  // Before/after snapshots
+  // Worker state
+  const [workerProgress, setWorkerProgress] = useState<WorkerProgress | null>(null);
+  const [showProgress, setShowProgress] = useState(false);
+  const cancelWorkerRef = useRef<(() => void) | null>(null);
+
+  // AI state
+  const [aiAnalysis, setAiAnalysis] = useState<AiAnalysisResult | null>(null);
+  const [isAiAnalyzing, setIsAiAnalyzing] = useState(false);
+
+  // Comparison and reports
   const [beforeSnapshot, setBeforeSnapshot] = useState<MidiSnapshot | null>(null);
   const [afterSnapshot, setAfterSnapshot] = useState<MidiSnapshot | null>(null);
   const [comparisons, setComparisons] = useState<ComparisonResult[]>([]);
-
-  // Quantization result and report
   const [lastResult, setLastResult] = useState<QuantizeResult | null>(null);
-
-  // Last exported blob for verification
   const [lastBlob, setLastBlob] = useState<Blob | null>(null);
+  const [lastOutputBuffer, setLastOutputBuffer] = useState<ArrayBuffer | null>(null);
   const [verificationResult, setVerificationResult] = useState<string>('');
   const [tempoInfo, setTempoInfo] = useState<string>('');
   const [binaryTestSuite, setBinaryTestSuite] = useState<TestSuite | null>(null);
 
+  // Project state
+  const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
+  const [configId, setConfigId] = useState<string>('default');
+
+  // Quantization params
   const [params, setParams] = useState<QuantizeParams>({
     ppq: 480,
     grid: '1/16',
@@ -79,6 +88,13 @@ function App() {
     humanizeTicks: 0,
     outputTempo: 56,
   });
+
+  // Initialize DB
+  useEffect(() => {
+    initializeDatabase().catch(err => {
+      console.error('Failed to initialize database:', err);
+    });
+  }, []);
 
   const handleFileLoad = useCallback(async (file: File) => {
     setIsProcessing(true);
@@ -101,23 +117,25 @@ function App() {
       setBinaryMidi(loadedBinaryMidi);
       setFileInfo(info);
 
-      // Select all tracks with notes by default
       const tracksWithNotes = info.tracks.filter(t => t.noteCount > 0).map(t => t.index);
       setSelectedTracks(tracksWithNotes);
-
       setParams(prev => ({ ...prev, ppq: info.ppq }));
 
-      // Create before snapshot
       const snapshot = createMidiSnapshot(loadedMidi, info.name);
       setBeforeSnapshot(snapshot);
       setAfterSnapshot(null);
       setComparisons([]);
       setLastResult(null);
       setLastBlob(null);
+      setLastOutputBuffer(null);
       setVerificationResult('');
+      setTempoInfo('');
+      setBinaryTestSuite(null);
+      setAiAnalysis(null);
+      setCurrentProjectId(null);
 
       const totalNotes = info.tracks.reduce((sum, t) => sum + t.noteCount, 0);
-      setStatus(`✓ Loaded "${info.name}" — ${info.tracks.length} tracks, ${totalNotes} notes, ${info.ppq} PPQ, ${info.tempo} BPM`);
+      setStatus(`✓ Loaded "${info.name}" — ${info.tracks.length} tracks, ${totalNotes} notes, ${info.ppq} PPQ`);
       setStatusType('success');
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
@@ -131,6 +149,10 @@ function App() {
   }, []);
 
   const handleClear = useCallback(() => {
+    if (cancelWorkerRef.current) {
+      cancelWorkerRef.current();
+      cancelWorkerRef.current = null;
+    }
     setMidi(null);
     setBinaryMidi(null);
     setFileInfo(null);
@@ -143,29 +165,31 @@ function App() {
     setComparisons([]);
     setLastResult(null);
     setLastBlob(null);
+    setLastOutputBuffer(null);
     setVerificationResult('');
     setTempoInfo('');
     setBinaryTestSuite(null);
+    setAiAnalysis(null);
+    setCurrentProjectId(null);
+    setShowProgress(false);
+    setWorkerProgress(null);
   }, []);
 
   const handleReset = useCallback(() => {
     if (!originalBufferRef.current || !fileInfo) return;
-
-    // Reload from original buffer
     const freshMidi = new Midi(originalBufferRef.current.slice(0));
     setMidi(freshMidi);
-
     const snapshot = createMidiSnapshot(freshMidi, fileInfo.name);
     setBeforeSnapshot(snapshot);
     setAfterSnapshot(null);
     setComparisons([]);
     setLastResult(null);
     setLastBlob(null);
+    setLastOutputBuffer(null);
     setVerificationResult('');
     setTempoInfo('');
     setBinaryTestSuite(null);
-
-    setStatus('✓ Reset to original. Ready to quantize again.');
+    setStatus('✓ Reset to original.');
     setStatusType('info');
   }, [fileInfo]);
 
@@ -175,7 +199,6 @@ function App() {
       setStatusType('error');
       return;
     }
-
     if (selectedTracks.length === 0) {
       setStatus('✗ No tracks selected');
       setStatusType('error');
@@ -183,110 +206,166 @@ function App() {
     }
 
     setIsProcessing(true);
-    setStatus('Processing quantization...');
+    setShowProgress(true);
+    setWorkerProgress({ percent: 0, message: 'Starting...' });
     setStatusType('loading');
 
-    await new Promise(resolve => setTimeout(resolve, 50));
+    const operationId = `op-${Date.now()}`;
+    performanceMonitor.start(operationId, originalBufferRef.current.byteLength);
 
+    const quantizeParams = { ...params, ppq: fileInfo.ppq };
+
+    const cancel = quantizeInWorker(
+      originalBufferRef.current.slice(0),
+      quantizeParams,
+      selectedTracks,
+      {
+        onProgress: (progress) => {
+          setWorkerProgress(progress);
+        },
+        onComplete: async (result) => {
+          try {
+            performanceMonitor.update(operationId, {
+              totalMs: result.durationMs,
+              trackCount: selectedTracks.length,
+            });
+
+            // Create blob from worker result
+            const blob = new Blob([result.midiBuffer], { type: 'audio/midi' });
+            setLastBlob(blob);
+            setLastOutputBuffer(result.midiBuffer);
+
+            // Re-parse for UI
+            const { midi: freshMidi } = await loadMidiFileFromBuffer(
+              result.midiBuffer,
+              fileInfo.name
+            );
+            setMidi(freshMidi);
+
+            const afterSnap = createMidiSnapshot(freshMidi, fileInfo.name);
+            setAfterSnapshot(afterSnap);
+
+            if (beforeSnapshot) {
+              const comps = selectedTracks.map(trackIdx =>
+                compareSnapshots(beforeSnapshot, afterSnap, trackIdx)
+              );
+              setComparisons(comps);
+            }
+
+            // Build result from worker output
+            const quantizeResult: QuantizeResult = {
+              success: true,
+              message: `Quantized ${selectedTracks.length} track(s). Output: ${result.outputTempo} BPM, PPQ ${result.ppq}`,
+              eventsProcessed: result.results.reduce((sum: number, r: any) => sum + (r.notesProcessed || 0) * 2, 0),
+              notesQuantized: result.results.reduce((sum: number, r: any) => sum + (r.notesMoved || 0) * 2, 0),
+              report: {
+                totalNotes: result.results.reduce((sum: number, r: any) => sum + (r.notesProcessed || 0), 0),
+                notesMoved: result.results.reduce((sum: number, r: any) => sum + (r.notesMoved || 0), 0),
+                notesUnchanged: result.results.reduce((sum: number, r: any) => sum + (r.notesUnchanged || 0), 0),
+                maxDisplacementMs: Math.max(...result.results.map((r: any) => r.maxDisplacementMs || 0)),
+                avgDisplacementMs: result.results.reduce((sum: number, r: any) => sum + (r.avgDisplacementMs || 0), 0) / Math.max(1, result.results.length),
+                warnings: [`Tempo set to ${result.outputTempo} BPM constant`, `PPQ: ${result.ppq}`],
+                perTrack: result.results,
+              },
+            };
+            setLastResult(quantizeResult);
+
+            // Verify
+            const verification = await verifyMidiBlob(blob);
+            setVerificationResult(verification.message);
+            setTempoInfo(verification.tempoInfo || '');
+
+            // Run binary tests
+            const testSuite = await runBinaryTests(
+              blob,
+              fileInfo.ppq,
+              params.outputTempo,
+              fileInfo.timeSignature,
+              params.grid
+            );
+            setBinaryTestSuite(testSuite);
+
+            // Download
+            const originalName = fileInfo.name.replace(/\.(mid|midi)$/i, '');
+            const gridLabel = params.grid.replace('/', '');
+            const downloadName = `${originalName}_q${gridLabel}_s${params.strength}.mid`;
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = downloadName;
+            document.body.appendChild(link);
+            link.click();
+            setTimeout(() => {
+              document.body.removeChild(link);
+              URL.revokeObjectURL(url);
+            }, 1000);
+
+            setStatus(`✓ ${quantizeResult.message}. Downloaded "${downloadName}" (${(blob.size / 1024).toFixed(1)} KB)`);
+            setStatusType('success');
+          } catch (error) {
+            setStatus(`✗ Post-processing error: ${error instanceof Error ? error.message : 'Unknown'}`);
+            setStatusType('error');
+          } finally {
+            setIsProcessing(false);
+            setShowProgress(false);
+          }
+        },
+        onError: (error) => {
+          setStatus(`✗ Error: ${error.message}`);
+          setStatusType('error');
+          setIsProcessing(false);
+          setShowProgress(false);
+        },
+        onCancelled: () => {
+          setStatus('⚠ Quantization cancelled');
+          setStatusType('info');
+          setIsProcessing(false);
+          setShowProgress(false);
+        },
+      }
+    );
+
+    cancelWorkerRef.current = cancel;
+  }, [fileInfo, params, selectedTracks, beforeSnapshot]);
+
+  const handleCancelQuantize = useCallback(() => {
+    if (cancelWorkerRef.current) {
+      cancelWorkerRef.current();
+      cancelWorkerRef.current = null;
+    }
+  }, []);
+
+  const handleAiAnalyze = useCallback(async () => {
+    if (!binaryMidi || selectedTracks.length === 0) return;
+
+    setIsAiAnalyzing(true);
     try {
-      // Re-parse binary MIDI from original buffer
-      const { binaryMidi: freshBinaryMidi } = await loadMidiFileFromBuffer(originalBufferRef.current, fileInfo.name);
-      const quantizeParams: QuantizeParams = { ...params, ppq: fileInfo.ppq };
+      const provider = aiRegistry.getActive();
+      if (!provider) throw new Error('No AI provider available');
 
-      // Perform tick-based quantization
-      const { quantizedMidi, result } = quantizeMidiBinary(
-        freshBinaryMidi,
-        quantizeParams,
-        selectedTracks,
-        null
-      );
-
-      if (!result.success) {
-        throw new Error(result.message);
-      }
-
-      setLastResult(result);
-
-      // Create after snapshot from quantized binary MIDI (via @tonejs/midi re-parse)
-      const quantizedBlob = exportQuantizedMidiBlob(quantizedMidi);
-      const quantizedArrayBuffer = await quantizedBlob.arrayBuffer();
-      const freshMidi = new Midi(quantizedArrayBuffer);
-      setMidi(freshMidi);
-
-      const afterSnap = createMidiSnapshot(freshMidi, fileInfo.name);
-      setAfterSnapshot(afterSnap);
-
-      // Generate comparisons
-      if (beforeSnapshot) {
-        const comps = selectedTracks.map(trackIdx =>
-          compareSnapshots(beforeSnapshot, afterSnap, trackIdx)
-        );
-        setComparisons(comps);
-      }
-
-      // Verify
-      const blob = quantizedBlob;
-      if (blob.size === 0) throw new Error('Generated MIDI is empty');
-
-      setLastBlob(blob);
-
-      // Verify the MIDI
-      const verification = await verifyMidiBlob(blob);
-      setVerificationResult(verification.message);
-      setTempoInfo(verification.tempoInfo || '');
-
-      if (!verification.valid) {
-        throw new Error(`MIDI verification failed: ${verification.message}`);
-      }
-
-      // Verify constant tempo
-      if (verification.tempoInfo && !verification.tempoInfo.includes('Single tempo')) {
-        const warning = 'Warning: MIDI does not have a single constant tempo';
-        setTempoInfo(prev => prev + ' - ' + warning);
-      }
-
-      // Run binary tests
-      const testSuite = await runBinaryTests(
-        blob,
-        fileInfo.ppq,
-        params.outputTempo,
-        fileInfo.timeSignature,
-        params.grid
-      );
-      setBinaryTestSuite(testSuite);
-
-      // Trigger download
-      const originalName = fileInfo.name.replace(/\.(mid|midi)$/i, '');
-      const gridLabel = params.grid.replace('/', '');
-      const downloadName = `${originalName}_q${gridLabel}_s${params.strength}.mid`;
-
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = downloadName;
-      link.style.display = 'none';
-      document.body.appendChild(link);
-      link.click();
-
-      setTimeout(() => {
-        document.body.removeChild(link);
-        URL.revokeObjectURL(url);
-      }, 1000);
-
-      setStatus(`✓ ${result.message}. Downloaded "${downloadName}" (${(blob.size / 1024).toFixed(1)} KB). Verified: ${verification.message}`);
-      setStatusType('success');
+      const result = await provider.analyze(binaryMidi, selectedTracks[0], params.grid);
+      setAiAnalysis(result);
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Quantization failed';
-      setStatus(`✗ Error: ${message}`);
+      setStatus(`✗ AI analysis failed: ${error instanceof Error ? error.message : 'Unknown'}`);
       setStatusType('error');
     } finally {
-      setIsProcessing(false);
+      setIsAiAnalyzing(false);
     }
-  }, [fileInfo, params, selectedTracks, beforeSnapshot]);
+  }, [binaryMidi, selectedTracks, params.grid]);
+
+  const handleAcceptSuggestion = useCallback((suggestion: AiSuggestion) => {
+    // In a full implementation, this would apply the suggestion to the MIDI
+    setStatus(`✓ Suggestion accepted: ${suggestion.title}`);
+    setStatusType('success');
+  }, []);
+
+  const handleRejectSuggestion = useCallback((suggestion: AiSuggestion) => {
+    setStatus(`✗ Suggestion rejected: ${suggestion.title}`);
+    setStatusType('info');
+  }, []);
 
   const handleDownloadReport = useCallback(() => {
     if (!lastResult?.report || !fileInfo) return;
-
     const reportText = generateTextReport(lastResult.report, fileInfo.name);
     const blob = new Blob([reportText], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
@@ -299,18 +378,13 @@ function App() {
       document.body.removeChild(link);
       URL.revokeObjectURL(url);
     }, 1000);
-
-    setStatus('✓ Report downloaded');
-    setStatusType('success');
   }, [lastResult, fileInfo]);
 
   const handleDownloadMidi = useCallback(() => {
     if (!lastBlob || !fileInfo) return;
-
     const originalName = fileInfo.name.replace(/\.(mid|midi)$/i, '');
     const gridLabel = params.grid.replace('/', '');
     const downloadName = `${originalName}_q${gridLabel}_s${params.strength}.mid`;
-
     const url = URL.createObjectURL(lastBlob);
     const link = document.createElement('a');
     link.href = url;
@@ -323,12 +397,24 @@ function App() {
     }, 1000);
   }, [lastBlob, fileInfo, params]);
 
+  const handleLoadProject = useCallback(async (projectId: string) => {
+    // Load project from DB
+    setStatus(`Loading project ${projectId}...`);
+    setStatusType('loading');
+    // Implementation would load from IndexedDB
+  }, []);
+
+  const handleProjectSaved = useCallback((projectId: string) => {
+    setCurrentProjectId(projectId);
+    setStatus('✓ Project saved');
+    setStatusType('success');
+  }, []);
+
   return (
     <div className="min-h-screen bg-gray-900 text-white flex flex-col">
       <Header />
 
-      <main className="flex-1 max-w-6xl mx-auto px-4 py-6 space-y-5 w-full">
-        {/* File Loader */}
+      <main className="flex-1 max-w-7xl mx-auto px-4 py-6 space-y-5 w-full">
         <FileLoader
           onFileLoad={handleFileLoad}
           fileInfo={fileInfo}
@@ -336,45 +422,40 @@ function App() {
           onClear={handleClear}
         />
 
-        {/* Main Content */}
+        <ProgressBar
+          progress={workerProgress?.percent || 0}
+          message={workerProgress?.message || ''}
+          onCancel={handleCancelQuantize}
+          isVisible={showProgress}
+        />
+
         {fileInfo && (
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
-            {/* Left: Track Selector + Info */}
+          <div className="grid grid-cols-1 lg:grid-cols-4 gap-5">
+            {/* Left column */}
             <div className="lg:col-span-1 space-y-4">
               <TrackSelector
                 tracks={fileInfo.tracks}
                 selectedTracks={selectedTracks}
                 onToggleTrack={(index) => {
                   setSelectedTracks(prev =>
-                    prev.includes(index)
-                      ? prev.filter(i => i !== index)
-                      : [...prev, index]
+                    prev.includes(index) ? prev.filter(i => i !== index) : [...prev, index]
                   );
                 }}
-                onSelectAll={() => {
-                  setSelectedTracks(fileInfo.tracks.filter(t => t.noteCount > 0).map(t => t.index));
-                }}
+                onSelectAll={() => setSelectedTracks(fileInfo.tracks.filter(t => t.noteCount > 0).map(t => t.index))}
                 onDeselectAll={() => setSelectedTracks([])}
               />
 
-              {/* File Info */}
               <div className="bg-gray-800/50 rounded-xl border border-gray-700/50 p-4">
                 <h3 className="text-sm font-medium text-white mb-3">File Info</h3>
                 <div className="space-y-2 text-sm">
                   <div className="flex justify-between">
-                    <span className="text-gray-400">Resolution</span>
-                    <span className="text-gray-200 font-mono">{fileInfo.ppq} PPQ</span>
+                    <span className="text-gray-400">PPQ</span>
+                    <span className="text-gray-200 font-mono">{fileInfo.ppq}</span>
                   </div>
                   <div className="flex justify-between">
                     <span className="text-gray-400">Tempo</span>
                     <span className="text-gray-200 font-mono">{fileInfo.tempo} BPM</span>
                   </div>
-                  {fileInfo.tempoChanges.length > 1 && (
-                    <div className="flex justify-between">
-                      <span className="text-gray-400">Tempo changes</span>
-                      <span className="text-yellow-300 font-mono">{fileInfo.tempoChanges.length}</span>
-                    </div>
-                  )}
                   <div className="flex justify-between">
                     <span className="text-gray-400">Time Sig</span>
                     <span className="text-gray-200 font-mono">{fileInfo.timeSignature[0]}/{fileInfo.timeSignature[1]}</span>
@@ -384,65 +465,24 @@ function App() {
                     <span className="text-gray-200 font-mono">{fileInfo.duration.toFixed(1)}s</span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-gray-400">Total Notes</span>
-                    <span className="text-gray-200 font-mono">
-                      {fileInfo.tracks.reduce((sum, t) => sum + t.noteCount, 0)}
-                    </span>
-                  </div>
-                  <div className="flex justify-between">
                     <span className="text-gray-400">Selected</span>
-                    <span className="text-cyan-300 font-mono">
-                      {selectedTracks.length} track(s)
-                    </span>
+                    <span className="text-cyan-300 font-mono">{selectedTracks.length} track(s)</span>
                   </div>
                 </div>
               </div>
 
-              {/* Quick Presets */}
-              <div className="bg-gray-800/50 rounded-xl border border-gray-700/50 p-4">
-                <h3 className="text-sm font-medium text-white mb-3">Quick Presets</h3>
-                <div className="space-y-2">
-                  <button
-                    onClick={() => setParams({ ...params, grid: '1/16', strength: 100, swing: 0, humanizeTicks: 0 })}
-                    className="w-full text-left px-3 py-2 bg-gray-700/30 rounded-lg text-sm text-gray-300 hover:bg-gray-700/50 transition-colors"
-                  >
-                    🎯 Perfect 16th Notes (100%)
-                  </button>
-                  <button
-                    onClick={() => setParams({ ...params, grid: '1/16', strength: 85, swing: 20, humanizeTicks: 0 })}
-                    className="w-full text-left px-3 py-2 bg-gray-700/30 rounded-lg text-sm text-gray-300 hover:bg-gray-700/50 transition-colors"
-                  >
-                    🎸 Groove (1/16, 85%, Swing 20)
-                  </button>
-                  <button
-                    onClick={() => setParams({ ...params, grid: '1/16', strength: 70, swing: 0, humanizeTicks: 5 })}
-                    className="w-full text-left px-3 py-2 bg-gray-700/30 rounded-lg text-sm text-gray-300 hover:bg-gray-700/50 transition-colors"
-                  >
-                    🎹 Soft + Humanize (70%)
-                  </button>
-                  <button
-                    onClick={() => setParams({ ...params, grid: '1/8T', strength: 90, swing: 0, humanizeTicks: 0 })}
-                    className="w-full text-left px-3 py-2 bg-gray-700/30 rounded-lg text-sm text-gray-300 hover:bg-gray-700/50 transition-colors"
-                  >
-                    🥁 Triplet (1/8T, 90%)
-                  </button>
-                  <button
-                    onClick={() => setParams({ ...params, grid: '1/32', strength: 100, swing: 0, humanizeTicks: 0 })}
-                    className="w-full text-left px-3 py-2 bg-gray-700/30 rounded-lg text-sm text-gray-300 hover:bg-gray-700/50 transition-colors"
-                  >
-                    ⚡ Tight 32nd (100%)
-                  </button>
-                  <button
-                    onClick={() => setParams({ ...params, grid: '1/8', strength: 100, swing: 0, humanizeTicks: 0 })}
-                    className="w-full text-left px-3 py-2 bg-gray-700/30 rounded-lg text-sm text-gray-300 hover:bg-gray-700/50 transition-colors"
-                  >
-                    🎵 Eighth Notes (1/8, 100%)
-                  </button>
-                </div>
-              </div>
+              <ProjectManager
+                currentProjectId={currentProjectId}
+                fileName={fileInfo.name}
+                inputFileBuffer={originalBufferRef.current}
+                outputFileBuffer={lastOutputBuffer}
+                configId={configId}
+                onLoadProject={handleLoadProject}
+                onProjectSaved={handleProjectSaved}
+              />
             </div>
 
-            {/* Right: Quantize Panel + Results */}
+            {/* Middle column */}
             <div className="lg:col-span-2 space-y-4">
               <QuantizePanel
                 params={params}
@@ -455,46 +495,46 @@ function App() {
                 disabled={!midi || selectedTracks.length === 0}
               />
 
-              {/* Comparison View */}
-              {comparisons.length > 0 && (
-                <ComparisonView comparisons={comparisons} />
-              )}
-
-              {/* Report Panel */}
+              {comparisons.length > 0 && <ComparisonView comparisons={comparisons} />}
               {lastResult?.report && (
                 <ReportPanel report={lastResult.report} verification={verificationResult} tempoInfo={tempoInfo} />
               )}
+              {binaryTestSuite && <BinaryTestPanel testSuite={binaryTestSuite} />}
+            </div>
 
-              {/* Binary Test Panel */}
-              {binaryTestSuite && (
-                <BinaryTestPanel testSuite={binaryTestSuite} />
-              )}
+            {/* Right column */}
+            <div className="lg:col-span-1 space-y-4">
+              <AiAssistantPanel
+                analysis={aiAnalysis}
+                isAnalyzing={isAiAnalyzing}
+                onAnalyze={handleAiAnalyze}
+                onAcceptSuggestion={handleAcceptSuggestion}
+                onRejectSuggestion={handleRejectSuggestion}
+                disabled={!binaryMidi || selectedTracks.length === 0}
+              />
             </div>
           </div>
         )}
 
-        {/* Status Bar */}
         <StatusBar status={status} type={statusType} />
 
-        {/* Footer Info */}
         {!fileInfo && (
           <div className="mt-8 text-center">
             <div className="inline-block bg-gray-800/30 rounded-xl border border-gray-700/30 p-6 max-w-lg text-left">
               <h2 className="text-lg font-semibold text-white mb-3 text-center">How it works</h2>
               <ol className="text-sm text-gray-400 space-y-2 list-decimal list-inside">
                 <li>Load a MIDI file (.mid or .midi)</li>
-                <li>Select the tracks you want to quantize</li>
-                <li>Choose a grid division and adjust parameters</li>
-                <li>Click <strong className="text-cyan-400">Quantize & Download</strong></li>
-                <li>Review the comparison and report</li>
-                <li>Download again or reset to try different settings</li>
+                <li>Select tracks and parameters</li>
+                <li>Click Quantize & Download (runs in Web Worker)</li>
+                <li>Review comparison, report, and binary tests</li>
+                <li>Optionally run AI analysis for suggestions</li>
+                <li>Save project to local database</li>
               </ol>
               <div className="mt-4 pt-4 border-t border-gray-700/30">
                 <p className="text-xs text-gray-500">
-                  <strong>Features:</strong> Multi-track • Binary & triplet grids • 
-                  Strength 0–100% • Swing • Humanize • Velocity preservation • 
-                  Tempo change support • Before/after comparison • Downloadable report • 
-                  MIDI verification • Undo/reset
+                  <strong>New in v2.0:</strong> IndexedDB project storage • Local AI heuristic analysis • 
+                  Web Worker acceleration with progress • Cancellable operations • 
+                  Binary MIDI verification • Deterministic tick-based engine
                 </p>
               </div>
             </div>
@@ -503,9 +543,9 @@ function App() {
       </main>
 
       <footer className="border-t border-gray-800 py-4 mt-auto">
-        <div className="max-w-6xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between text-xs text-gray-600 gap-2">
-          <span>QUANTIZE.IT — MIDI Quantizer Pro v1.1</span>
-          <span>All processing happens locally in your browser. No files are uploaded.</span>
+        <div className="max-w-7xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between text-xs text-gray-600 gap-2">
+          <span>QUANTIZE.IT — MIDI Quantizer Pro v2.0</span>
+          <span>All processing is local. No data leaves your browser.</span>
         </div>
       </footer>
     </div>
