@@ -19,6 +19,7 @@ import { ProjectManager } from './components/ProjectManager';
 import { AudioTranscriptionPanel } from './components/AudioTranscriptionPanel';
 import { MusicalStagesPanel } from './components/MusicalStagesPanel';
 import { Player } from './components/Player';
+import { SpectralAnalysisPanel } from './components/SpectralAnalysisPanel';
 import {
   loadMidiFile,
   loadMidiFileFromBuffer,
@@ -99,6 +100,10 @@ function App() {
   // Player state
   const [quantizedBinaryMidi, setQuantizedBinaryMidi] = useState<MidiFile | null>(null);
   const [trackNames, setTrackNames] = useState<string[]>([]);
+
+  // Spectral analysis state
+  const [audioBuffer, setAudioBuffer] = useState<AudioBuffer | null>(null);
+  const [transcribedNotes, setTranscribedNotes] = useState<any[] | null>(null);
 
   // Initialize DB
   useEffect(() => {
@@ -572,8 +577,20 @@ function App() {
             </span>
           </button>
           {showAudioPanel && (
-            <div className="mt-3">
+            <div className="mt-3 space-y-3">
               <AudioTranscriptionPanel
+                onStatusChange={(message, type) => {
+                  setStatus(message);
+                  setStatusType(type === 'success' ? 'success' : type === 'error' ? 'error' : 'info');
+                }}
+              />
+              
+              {/* Spectral Analysis Panel */}
+              <SpectralAnalysisPanel
+                audioBuffer={audioBuffer}
+                notes={transcribedNotes}
+                trackIndex={0}
+                trackName="Transcription"
                 onStatusChange={(message, type) => {
                   setStatus(message);
                   setStatusType(type === 'success' ? 'success' : type === 'error' ? 'error' : 'info');
