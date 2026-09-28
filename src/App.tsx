@@ -20,6 +20,7 @@ import { AudioTranscriptionPanel } from './components/AudioTranscriptionPanel';
 import { MusicalStagesPanel } from './components/MusicalStagesPanel';
 import { Player } from './components/Player';
 import { SpectralAnalysisPanel } from './components/SpectralAnalysisPanel';
+import { MidiImportTestPanel } from './components/MidiImportTestPanel';
 import {
   loadMidiFile,
   loadMidiFileFromBuffer,
@@ -560,6 +561,11 @@ function App() {
         )}
 
         <StatusBar status={status} type={statusType} />
+
+        {/* MIDI Import Test Panel - Para verificar corrección de regresión */}
+        <div className="mt-4">
+          <MidiImportTestPanel />
+        </div>
 
         {/* Audio Transcription Panel (CAPA 1-5) */}
         <div className="mt-4">

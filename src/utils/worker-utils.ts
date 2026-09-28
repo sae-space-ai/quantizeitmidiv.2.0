@@ -9,7 +9,7 @@ import type { MidiFile, MidiTrackEvent, ParsedNote, TempoEvent, TimeSignatureEve
 import type { GridType, QuantizeParams, GrooveTemplate } from '../types';
 
 // @ts-ignore - midi-file has no types
-import { parse as midiParse, write as midiWrite } from 'midi-file';
+import { parseMidi as midiParse, writeMidi as midiWrite } from 'midi-file';
 
 // ============ MIDI PARSING ============
 
@@ -27,9 +27,9 @@ export function parseMidiBinary(buffer: ArrayBuffer): MidiFile {
 
   return {
     header: {
-      formatType: parsed.header.formatType,
+      formatType: parsed.header.format,
       numTracks: parsed.header.numTracks,
-      ticksPerBeat: parsed.header.ticksPerBeat,
+      ticksPerBeat: parsed.header.ticksPerBeat || 480,
     },
     tracks,
   };
@@ -49,14 +49,16 @@ export function writeMidiBinary(midi: MidiFile): Uint8Array {
       });
   });
 
-  return midiWrite({
+  const result = midiWrite({
     header: {
-      formatType: midi.header.formatType,
+      format: midi.header.formatType as 0 | 1 | 2,
       numTracks: midi.header.numTracks,
       ticksPerBeat: midi.header.ticksPerBeat,
     },
-    tracks,
+    tracks: tracks as any,
   });
+
+  return new Uint8Array(result);
 }
 
 export function extractNotes(track: MidiTrackEvent[]): ParsedNote[] {
