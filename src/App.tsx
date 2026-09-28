@@ -4,6 +4,7 @@
  */
 
 import { useState, useCallback, useRef, useEffect } from 'react';
+import { Music } from 'lucide-react';
 import { Header } from './components/Header';
 import { FileLoader } from './components/FileLoader';
 import { TrackSelector } from './components/TrackSelector';
@@ -15,6 +16,7 @@ import { BinaryTestPanel } from './components/BinaryTestPanel';
 import { ProgressBar } from './components/ProgressBar';
 import { AiAssistantPanel } from './components/AiAssistantPanel';
 import { ProjectManager } from './components/ProjectManager';
+import { AudioTranscriptionPanel } from './components/AudioTranscriptionPanel';
 import {
   loadMidiFile,
   loadMidiFileFromBuffer,
@@ -88,6 +90,9 @@ function App() {
     humanizeTicks: 0,
     outputTempo: 56,
   });
+
+  // Audio transcription panel visibility
+  const [showAudioPanel, setShowAudioPanel] = useState(false);
 
   // Initialize DB
   useEffect(() => {
@@ -517,6 +522,33 @@ function App() {
         )}
 
         <StatusBar status={status} type={statusType} />
+
+        {/* Audio Transcription Panel (CAPA 1-5) */}
+        <div className="mt-4">
+          <button
+            onClick={() => setShowAudioPanel(!showAudioPanel)}
+            className="w-full flex items-center justify-between px-4 py-3 bg-purple-500/10 hover:bg-purple-500/15 border border-purple-500/30 rounded-xl text-left transition-colors"
+          >
+            <div className="flex items-center gap-2">
+              <Music className="w-5 h-5 text-purple-400" />
+              <span className="font-medium text-white">Audio → MIDI Transcription</span>
+              <span className="text-xs px-2 py-0.5 bg-purple-500/20 text-purple-300 rounded">NEW</span>
+            </div>
+            <span className="text-sm text-gray-400">
+              {showAudioPanel ? '▼ Hide' : '▶ Show'}
+            </span>
+          </button>
+          {showAudioPanel && (
+            <div className="mt-3">
+              <AudioTranscriptionPanel
+                onStatusChange={(message, type) => {
+                  setStatus(message);
+                  setStatusType(type === 'success' ? 'success' : type === 'error' ? 'error' : 'info');
+                }}
+              />
+            </div>
+          )}
+        </div>
 
         {!fileInfo && (
           <div className="mt-8 text-center">
