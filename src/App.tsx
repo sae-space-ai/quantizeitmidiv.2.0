@@ -1,9 +1,12 @@
 /**
  * QUANTIZE.IT - MIDI Quantizer Pro
  * Main application component.
+ * 
+ * Flow: Load MIDI → Parse → Select track/params → Quantize → Download result.
+ * Uses ArrayBuffer cloning to preserve original and process a copy.
  */
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import { Header } from './components/Header';
 import { FileLoader } from './components/FileLoader';
 import { TrackSelector } from './components/TrackSelector';
@@ -16,6 +19,8 @@ import { Midi } from '@tonejs/midi';
 type StatusType = 'idle' | 'success' | 'error' | 'info' | 'loading';
 
 function App() {
+  // Store original ArrayBuffer to allow re-quantization from scratch
+  const originalBufferRef = useRef<ArrayBuffer | null>(null);
   const [midi, setMidi] = useState<Midi | null>(null);
   const [fileInfo, setFileInfo] = useState<MidiFileInfo | null>(null);
   const [selectedTrack, setSelectedTrack] = useState(0);
@@ -39,16 +44,41 @@ function App() {
     setStatusType('loading');
 
     try {
+      // Validate file size
+      if (file.size === 0) {
+        throw new Error('File is empty');
+      }
+      if (file.size > 50 * 1024 * 1024) {
+        throw new Error('File is too large (max 50MB)');
+      }
+
+      // Read file as ArrayBuffer and store for re-quantization
+      const arrayBuffer = await file.arrayBuffer();
+      originalBufferRef.current = arrayBuffer.slice(0); // Clone the buffer
+
+      // Parse MIDI
       const { midi: loadedMidi, info } = await loadMidiFile(file);
+
+      // Validate we have at least one track with notes
+      const hasNotes = info.tracks.some(t => t.noteCount > 0);
+      if (!hasNotes) {
+        throw new Error('MIDI file has no notes in any track');
+      }
+
       setMidi(loadedMidi);
       setFileInfo(info);
       setSelectedTrack(0);
       setParams(prev => ({ ...prev, ppq: info.ppq }));
-      setStatus(`Loaded "${info.name}" — ${info.tracks.length} tracks, ${info.ppq} PPQ, ${info.tempo} BPM`);
+
+      const totalNotes = info.tracks.reduce((sum, t) => sum + t.noteCount, 0);
+      setStatus(`✓ Loaded "${info.name}" — ${info.tracks.length} tracks, ${totalNotes} notes, ${info.ppq} PPQ, ${info.tempo} BPM`);
       setStatusType('success');
     } catch (error) {
-      setStatus(`Error loading file: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      const message = error instanceof Error ? error.message : 'Unknown error loading file';
+      setStatus(`✗ Error: ${message}`);
       setStatusType('error');
+      setMidi(null);
+      setFileInfo(null);
     } finally {
       setIsProcessing(false);
     }
@@ -60,56 +90,90 @@ function App() {
     setSelectedTrack(0);
     setStatus('');
     setStatusType('idle');
+    originalBufferRef.current = null;
   }, []);
 
   const handleQuantize = useCallback(async () => {
-    if (!midi || !fileInfo) return;
+    if (!originalBufferRef.current || !fileInfo) {
+      setStatus('✗ No MIDI file loaded');
+      setStatusType('error');
+      return;
+    }
 
     setIsProcessing(true);
-    setStatus('Quantizing...');
+    setStatus('Processing quantization...');
     setStatusType('loading');
 
+    // Use setTimeout to allow UI to update before heavy processing
+    await new Promise(resolve => setTimeout(resolve, 50));
+
     try {
-      // Clone the MIDI to preserve original
-      const midiClone = new Midi(midi.toArray());
-      
-      // Update PPQ from file info
-      const quantizeParams = { ...params, ppq: fileInfo.ppq };
-      
-      // Quantize
-      const result: QuantizeResult = quantizeMidi(midiClone, quantizeParams, selectedTrack, null);
+      // Create fresh Midi from original buffer (never modify original)
+      const freshMidi = new Midi(originalBufferRef.current.slice(0));
 
-      if (result.success) {
-        // Export and download
-        const blob = exportMidiBlob(midiClone);
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `quantized_${fileInfo.name}`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-
-        setStatus(`✓ ${result.message} — ${result.notesQuantized} notes quantized. File downloaded!`);
-        setStatusType('success');
-      } else {
-        setStatus(`Error: ${result.message}`);
-        setStatusType('error');
+      // Validate track
+      const track = freshMidi.tracks[selectedTrack];
+      if (!track) {
+        throw new Error(`Track ${selectedTrack} not found`);
       }
+      if (track.notes.length === 0) {
+        throw new Error('Selected track has no notes');
+      }
+
+      // Set up quantization parameters with correct PPQ
+      const quantizeParams: QuantizeParams = { ...params, ppq: fileInfo.ppq };
+
+      // Perform quantization
+      const result: QuantizeResult = quantizeMidi(freshMidi, quantizeParams, selectedTrack, null);
+
+      if (!result.success) {
+        throw new Error(result.message);
+      }
+
+      // Export quantized MIDI
+      const blob = exportMidiBlob(freshMidi);
+
+      // Validate blob
+      if (blob.size === 0) {
+        throw new Error('Generated MIDI file is empty');
+      }
+
+      // Generate download filename
+      const originalName = fileInfo.name.replace(/\.(mid|midi)$/i, '');
+      const gridLabel = params.grid.replace('/', '');
+      const downloadName = `${originalName}_q${gridLabel}_s${params.strength}.mid`;
+
+      // Trigger download
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = downloadName;
+      link.style.display = 'none';
+      document.body.appendChild(link);
+      link.click();
+
+      // Cleanup after a delay to ensure download starts
+      setTimeout(() => {
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+      }, 1000);
+
+      setStatus(`✓ Success! ${result.notesQuantized} events quantized. Downloaded "${downloadName}" (${(blob.size / 1024).toFixed(1)} KB)`);
+      setStatusType('success');
     } catch (error) {
-      setStatus(`Error: ${error instanceof Error ? error.message : 'Quantization failed'}`);
+      const message = error instanceof Error ? error.message : 'Quantization failed';
+      setStatus(`✗ Error: ${message}`);
       setStatusType('error');
     } finally {
       setIsProcessing(false);
     }
-  }, [midi, fileInfo, params, selectedTrack]);
+  }, [fileInfo, params, selectedTrack]);
 
   return (
-    <div className="min-h-screen bg-gray-900 text-white">
+    <div className="min-h-screen bg-gray-900 text-white flex flex-col">
       <Header />
       
-      <main className="max-w-5xl mx-auto px-4 py-6 space-y-5">
+      <main className="flex-1 max-w-5xl mx-auto px-4 py-6 space-y-5 w-full">
         {/* File Loader */}
         <FileLoader
           onFileLoad={handleFileLoad}
@@ -121,8 +185,8 @@ function App() {
         {/* Main Content */}
         {fileInfo && (
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
-            {/* Left: Track Selector */}
-            <div className="lg:col-span-1">
+            {/* Left: Track Selector + Info + Presets */}
+            <div className="lg:col-span-1 space-y-4">
               <TrackSelector
                 tracks={fileInfo.tracks}
                 selectedTrack={selectedTrack}
@@ -130,7 +194,7 @@ function App() {
               />
               
               {/* Info Panel */}
-              <div className="mt-4 bg-gray-800/50 rounded-xl border border-gray-700/50 p-4">
+              <div className="bg-gray-800/50 rounded-xl border border-gray-700/50 p-4">
                 <h3 className="text-sm font-medium text-white mb-3">File Info</h3>
                 <div className="space-y-2 text-sm">
                   <div className="flex justify-between">
@@ -155,11 +219,17 @@ function App() {
                       {fileInfo.tracks.reduce((sum, t) => sum + t.noteCount, 0)}
                     </span>
                   </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-400">Selected Track</span>
+                    <span className="text-cyan-300 font-mono">
+                      {fileInfo.tracks[selectedTrack]?.noteCount ?? 0} notes
+                    </span>
+                  </div>
                 </div>
               </div>
 
               {/* Quick Presets */}
-              <div className="mt-4 bg-gray-800/50 rounded-xl border border-gray-700/50 p-4">
+              <div className="bg-gray-800/50 rounded-xl border border-gray-700/50 p-4">
                 <h3 className="text-sm font-medium text-white mb-3">Quick Presets</h3>
                 <div className="space-y-2">
                   <button
@@ -178,7 +248,7 @@ function App() {
                     onClick={() => setParams({ ...params, grid: '1/16', strength: 70, swing: 0, humanizeTicks: 5 })}
                     className="w-full text-left px-3 py-2 bg-gray-700/30 rounded-lg text-sm text-gray-300 hover:bg-gray-700/50 transition-colors"
                   >
-                    🎹 Soft Quantize + Humanize (70%, ±5 ticks)
+                    🎹 Soft + Humanize (70%, ±5 ticks)
                   </button>
                   <button
                     onClick={() => setParams({ ...params, grid: '1/8T', strength: 90, swing: 0, humanizeTicks: 0 })}
@@ -215,19 +285,20 @@ function App() {
         {/* Footer Info */}
         {!fileInfo && (
           <div className="mt-8 text-center">
-            <div className="inline-block bg-gray-800/30 rounded-xl border border-gray-700/30 p-6 max-w-lg">
-              <h2 className="text-lg font-semibold text-white mb-2">How it works</h2>
-              <ol className="text-sm text-gray-400 text-left space-y-2 list-decimal list-inside">
+            <div className="inline-block bg-gray-800/30 rounded-xl border border-gray-700/30 p-6 max-w-lg text-left">
+              <h2 className="text-lg font-semibold text-white mb-3 text-center">How it works</h2>
+              <ol className="text-sm text-gray-400 space-y-2 list-decimal list-inside">
                 <li>Load a MIDI file (.mid or .midi)</li>
                 <li>Select the track you want to quantize</li>
                 <li>Choose a grid division (1/4 to 1/32, including triplets)</li>
                 <li>Adjust strength, swing, and humanize parameters</li>
-                <li>Click "Quantize & Download" to get your processed MIDI</li>
+                <li>Click <strong className="text-cyan-400">Quantize & Download</strong> to get your processed MIDI</li>
               </ol>
               <div className="mt-4 pt-4 border-t border-gray-700/30">
                 <p className="text-xs text-gray-500">
-                  Supports: Binary grids (1/4, 1/8, 1/16, 1/32) • Triplet grids (1/4T, 1/8T, 1/16T) • 
-                  Strength 0-100% • Swing • Humanize • Velocity preservation • Note collision handling
+                  <strong>Features:</strong> Binary grids (1/4, 1/8, 1/16, 1/32) • Triplet grids (1/4T, 1/8T, 1/16T) • 
+                  Strength 0–100% • Swing • Humanize • Velocity preservation • 
+                  Monophonic/polyphonic detection • Tempo change support • Note collision handling
                 </p>
               </div>
             </div>
@@ -236,10 +307,10 @@ function App() {
       </main>
 
       {/* Footer */}
-      <footer className="mt-auto border-t border-gray-800 py-4">
-        <div className="max-w-5xl mx-auto px-4 flex items-center justify-between text-xs text-gray-600">
+      <footer className="border-t border-gray-800 py-4 mt-auto">
+        <div className="max-w-5xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between text-xs text-gray-600 gap-2">
           <span>QUANTIZE.IT — MIDI Quantizer Pro v1.0</span>
-          <span>All processing happens in your browser. No files are uploaded.</span>
+          <span>All processing happens locally in your browser. No files are uploaded to any server.</span>
         </div>
       </footer>
     </div>

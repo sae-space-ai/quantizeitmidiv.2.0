@@ -1,11 +1,14 @@
 /**
  * QUANTIZE.IT - MIDI Quantizer Pro
  * MIDI file I/O operations using @tonejs/midi.
+ * 
+ * Works in time domain (seconds) to properly handle tempo changes.
+ * Preserves all MIDI events including program changes, control changes, etc.
  */
 
 import { Midi } from '@tonejs/midi';
-import type { MidiFileInfo, TrackInfo, QuantizeParams, GrooveTemplate, QuantizeResult } from '../types';
-import { quantizeSingle, extractGrooveTemplate, type GridType } from './quantizer';
+import type { MidiFileInfo, TrackInfo, QuantizeParams, GrooveTemplate, QuantizeResult, GridType } from '../types';
+import { getGridIntervalSeconds, quantizeSingleTime, extractGrooveTemplate } from './quantizer';
 
 /**
  * Load and parse a MIDI file from a File object.
@@ -36,8 +39,48 @@ export async function loadMidiFile(file: File): Promise<{ midi: Midi; info: Midi
 }
 
 /**
+ * Get the current BPM at a given time, considering tempo changes.
+ */
+function getBpmAtTime(midi: Midi, time: number): number {
+  if (midi.header.tempos.length === 0) return 120;
+
+  // Find the last tempo change before or at the given time
+  let currentBpm = midi.header.tempos[0].bpm;
+  for (const tempo of midi.header.tempos) {
+    if (tempo.time !== undefined && tempo.time <= time) {
+      currentBpm = tempo.bpm;
+    } else if (tempo.time !== undefined && tempo.time > time) {
+      break;
+    }
+  }
+  return currentBpm;
+}
+
+/**
+ * Detect if a track is monophonic (no overlapping notes).
+ */
+function isTrackMonophonic(notes: Array<{ time: number; duration: number }>): boolean {
+  if (notes.length <= 1) return true;
+
+  // Sort by start time
+  const sorted = [...notes].sort((a, b) => a.time - b.time);
+
+  for (let i = 0; i < sorted.length - 1; i++) {
+    const currentEnd = sorted[i].time + sorted[i].duration;
+    const nextStart = sorted[i + 1].time;
+
+    // If current note ends after next note starts, it's polyphonic
+    if (currentEnd > nextStart) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+/**
  * Quantize a MIDI file with the given parameters.
- * Returns a new Midi object with quantized notes.
+ * Works in time domain (seconds) to properly handle tempo changes.
  */
 export function quantizeMidi(
   midi: Midi,
@@ -51,82 +94,97 @@ export function quantizeMidi(
       throw new Error(`Track ${trackIndex} not found`);
     }
 
+    if (track.notes.length === 0) {
+      throw new Error('Track has no notes to quantize');
+    }
+
     let notesQuantized = 0;
     const eventsProcessed = track.notes.length * 2; // note_on + note_off
 
-    // Convert note times to ticks
-    const bpm = midi.header.tempos.length > 0 ? midi.header.tempos[0].bpm : 120;
-    const ticksPerSecond = (params.ppq * bpm) / 60;
+    // Detect if track is monophonic
+    const isMono = isTrackMonophonic(track.notes);
 
-    // Collect all note data
-    interface NoteData {
-      startTick: number;
-      endTick: number;
-      midiNote: number;
-      velocity: number;
+    // Process each note
+    interface QuantizedNote {
+      time: number;
       duration: number;
+      midi: number;
+      name: string;
+      octave: number;
+      velocity: number;
     }
 
-    const noteData: NoteData[] = track.notes.map(note => ({
-      startTick: Math.round(note.time * ticksPerSecond),
-      endTick: Math.round((note.time + note.duration) * ticksPerSecond),
-      midiNote: note.midi,
-      velocity: note.velocity,
-      duration: note.duration,
-    }));
+    const quantizedNotes: QuantizedNote[] = [];
 
-    // Quantize starts
-    if (params.quantizeStarts) {
-      for (const note of noteData) {
-        const originalStart = note.startTick;
-        note.startTick = quantizeSingle(originalStart, params, groove);
+    for (const note of track.notes) {
+      // Get BPM at note start time
+      const bpm = getBpmAtTime(midi, note.time);
+      const gridInterval = getGridIntervalSeconds(bpm, params.grid);
+
+      let newTime = note.time;
+      let newDuration = note.duration;
+
+      // Quantize start time
+      if (params.quantizeStarts) {
+        newTime = quantizeSingleTime(note.time, gridInterval, params, groove);
         notesQuantized++;
       }
+
+      // Quantize end time
+      if (params.quantizeEnds) {
+        const endTime = note.time + note.duration;
+        const bpmEnd = getBpmAtTime(midi, endTime);
+        const gridIntervalEnd = getGridIntervalSeconds(bpmEnd, params.grid);
+        const newEndTime = quantizeSingleTime(endTime, gridIntervalEnd, params, groove);
+
+        // Ensure duration is positive
+        newDuration = Math.max(0.001, newEndTime - newTime);
+        notesQuantized++;
+      } else {
+        // Preserve original duration
+        newDuration = note.duration;
+      }
+
+      quantizedNotes.push({
+        time: newTime,
+        duration: newDuration,
+        midi: note.midi,
+        name: note.name,
+        octave: note.octave,
+        velocity: params.preserveVelocity ? note.velocity : 0.8,
+      });
     }
 
-    // Quantize ends
-    if (params.quantizeEnds) {
-      for (const note of noteData) {
-        const originalEnd = note.endTick;
-        note.endTick = quantizeSingle(originalEnd, params, groove);
-        // Ensure end is after start
-        if (note.endTick <= note.startTick) {
-          note.endTick = note.startTick + 1;
+    // Sort by time to maintain chronological order
+    quantizedNotes.sort((a, b) => a.time - b.time);
+
+    // For monophonic tracks, ensure no overlapping notes
+    if (isMono) {
+      for (let i = 0; i < quantizedNotes.length - 1; i++) {
+        const currentEnd = quantizedNotes[i].time + quantizedNotes[i].duration;
+        const nextStart = quantizedNotes[i + 1].time;
+
+        // If overlap, shorten current note
+        if (currentEnd > nextStart) {
+          quantizedNotes[i].duration = Math.max(0.001, nextStart - quantizedNotes[i].time);
         }
-        notesQuantized++;
       }
     }
 
-    // Sort by start tick to maintain chronological order
-    noteData.sort((a, b) => a.startTick - b.startTick);
+    // For polyphonic tracks, handle simultaneous notes (chords)
+    // Keep them as separate notes but ensure proper ordering
+    // No special handling needed - @tonejs/midi will manage this
 
-    // Check for collisions (same tick and same note)
-    const seen = new Set<string>();
-    const uniqueNotes: NoteData[] = [];
-    for (const note of noteData) {
-      const key = `${note.startTick}-${note.midiNote}`;
-      if (!seen.has(key)) {
-        seen.add(key);
-        uniqueNotes.push(note);
-      }
-    }
-
-    // Apply changes back to track - clear and re-add notes
+    // Clear existing notes and add quantized ones
     track.notes = [];
-    for (const note of uniqueNotes) {
-      const noteName = midiNoteToName(note.midiNote);
-      const octave = Math.floor(note.midiNote / 12) - 1;
-      const time = note.startTick / ticksPerSecond;
-      const duration = (note.endTick - note.startTick) / ticksPerSecond;
-      const velocity = params.preserveVelocity ? note.velocity : 0.8;
-      
+    for (const note of quantizedNotes) {
       track.addNote({
-        midi: note.midiNote,
-        name: noteName,
-        octave: octave,
-        velocity: velocity,
-        time: time,
-        duration: duration,
+        midi: note.midi,
+        name: note.name,
+        octave: note.octave,
+        velocity: note.velocity,
+        time: note.time,
+        duration: note.duration,
       });
     }
 
@@ -148,18 +206,15 @@ export function quantizeMidi(
 
 /**
  * Export a Midi object as a downloadable blob.
+ * Returns a Blob containing valid MIDI data.
  */
 export function exportMidiBlob(midi: Midi): Blob {
   const midiData = midi.toArray();
-  return new Blob([new Uint8Array(midiData)], { type: 'audio/midi' });
-}
-
-/**
- * Convert MIDI note number to note name.
- */
-function midiNoteToName(midi: number): string {
-  const noteNames = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
-  return noteNames[midi % 12];
+  // midi.toArray() returns Uint8Array, create a proper copy for the Blob
+  const buffer = new ArrayBuffer(midiData.length);
+  const view = new Uint8Array(buffer);
+  view.set(midiData);
+  return new Blob([buffer], { type: 'audio/midi' });
 }
 
 /**
@@ -169,7 +224,7 @@ export function extractGrooveFromMidi(
   midi: Midi,
   trackIndex: number,
   grid: GridType,
-  ppq: number
+  _ppq: number
 ): GrooveTemplate {
   const track = midi.tracks[trackIndex];
   if (!track || track.notes.length === 0) {
@@ -177,8 +232,7 @@ export function extractGrooveFromMidi(
   }
 
   const bpm = midi.header.tempos.length > 0 ? midi.header.tempos[0].bpm : 120;
-  const ticksPerSecond = (ppq * bpm) / 60;
-  const noteTicks = track.notes.map(note => Math.round(note.time * ticksPerSecond));
+  const noteTimes = track.notes.map(note => note.time);
 
-  return extractGrooveTemplate(noteTicks, ppq, grid, 'Extracted from MIDI');
+  return extractGrooveTemplate(noteTimes, bpm, grid, 'Extracted from MIDI');
 }
