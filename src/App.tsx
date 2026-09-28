@@ -19,15 +19,19 @@ import { QuantizePanel } from './components/QuantizePanel';
 import { StatusBar } from './components/StatusBar';
 import { ComparisonView } from './components/ComparisonView';
 import { ReportPanel } from './components/ReportPanel';
+import { BinaryTestPanel } from './components/BinaryTestPanel';
 import {
   loadMidiFile,
-  quantizeMidi,
-  exportMidiBlob,
+  loadMidiFileFromBuffer,
+  quantizeMidiBinary,
+  exportQuantizedMidiBlob,
   createMidiSnapshot,
   compareSnapshots,
   verifyMidiBlob,
   generateTextReport,
 } from './utils/midi-io';
+import { runBinaryTests, formatTestResults, type TestSuite } from './utils/binary-tests';
+import type { MidiFile } from './utils/midi-types';
 import type {
   MidiFileInfo,
   QuantizeParams,
@@ -43,6 +47,7 @@ function App() {
   // Store original ArrayBuffer for re-quantization
   const originalBufferRef = useRef<ArrayBuffer | null>(null);
   const [midi, setMidi] = useState<Midi | null>(null);
+  const [binaryMidi, setBinaryMidi] = useState<MidiFile | null>(null);
   const [fileInfo, setFileInfo] = useState<MidiFileInfo | null>(null);
   const [selectedTracks, setSelectedTracks] = useState<number[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -61,6 +66,7 @@ function App() {
   const [lastBlob, setLastBlob] = useState<Blob | null>(null);
   const [verificationResult, setVerificationResult] = useState<string>('');
   const [tempoInfo, setTempoInfo] = useState<string>('');
+  const [binaryTestSuite, setBinaryTestSuite] = useState<TestSuite | null>(null);
 
   const [params, setParams] = useState<QuantizeParams>({
     ppq: 480,
@@ -86,12 +92,13 @@ function App() {
       const arrayBuffer = await file.arrayBuffer();
       originalBufferRef.current = arrayBuffer.slice(0);
 
-      const { midi: loadedMidi, info } = await loadMidiFile(file);
+      const { midi: loadedMidi, info, binaryMidi: loadedBinaryMidi } = await loadMidiFile(file);
 
       const hasNotes = info.tracks.some(t => t.noteCount > 0);
       if (!hasNotes) throw new Error('MIDI file has no notes');
 
       setMidi(loadedMidi);
+      setBinaryMidi(loadedBinaryMidi);
       setFileInfo(info);
 
       // Select all tracks with notes by default
@@ -125,6 +132,7 @@ function App() {
 
   const handleClear = useCallback(() => {
     setMidi(null);
+    setBinaryMidi(null);
     setFileInfo(null);
     setSelectedTracks([]);
     setStatus('');
@@ -137,6 +145,7 @@ function App() {
     setLastBlob(null);
     setVerificationResult('');
     setTempoInfo('');
+    setBinaryTestSuite(null);
   }, []);
 
   const handleReset = useCallback(() => {
@@ -154,6 +163,7 @@ function App() {
     setLastBlob(null);
     setVerificationResult('');
     setTempoInfo('');
+    setBinaryTestSuite(null);
 
     setStatus('✓ Reset to original. Ready to quantize again.');
     setStatusType('info');
@@ -179,22 +189,30 @@ function App() {
     await new Promise(resolve => setTimeout(resolve, 50));
 
     try {
-      // Create fresh Midi from original buffer
-      const freshMidi = new Midi(originalBufferRef.current.slice(0));
+      // Re-parse binary MIDI from original buffer
+      const { binaryMidi: freshBinaryMidi } = await loadMidiFileFromBuffer(originalBufferRef.current, fileInfo.name);
       const quantizeParams: QuantizeParams = { ...params, ppq: fileInfo.ppq };
 
-      // Perform quantization
-      const result = quantizeMidi(freshMidi, quantizeParams, selectedTracks, null);
+      // Perform tick-based quantization
+      const { quantizedMidi, result } = quantizeMidiBinary(
+        freshBinaryMidi,
+        quantizeParams,
+        selectedTracks,
+        null
+      );
 
       if (!result.success) {
         throw new Error(result.message);
       }
 
-      // Update MIDI state
-      setMidi(freshMidi);
       setLastResult(result);
 
-      // Create after snapshot
+      // Create after snapshot from quantized binary MIDI (via @tonejs/midi re-parse)
+      const quantizedBlob = exportQuantizedMidiBlob(quantizedMidi);
+      const quantizedArrayBuffer = await quantizedBlob.arrayBuffer();
+      const freshMidi = new Midi(quantizedArrayBuffer);
+      setMidi(freshMidi);
+
       const afterSnap = createMidiSnapshot(freshMidi, fileInfo.name);
       setAfterSnapshot(afterSnap);
 
@@ -206,8 +224,8 @@ function App() {
         setComparisons(comps);
       }
 
-      // Export and verify
-      const blob = exportMidiBlob(freshMidi);
+      // Verify
+      const blob = quantizedBlob;
       if (blob.size === 0) throw new Error('Generated MIDI is empty');
 
       setLastBlob(blob);
@@ -226,6 +244,16 @@ function App() {
         const warning = 'Warning: MIDI does not have a single constant tempo';
         setTempoInfo(prev => prev + ' - ' + warning);
       }
+
+      // Run binary tests
+      const testSuite = await runBinaryTests(
+        blob,
+        fileInfo.ppq,
+        params.outputTempo,
+        fileInfo.timeSignature,
+        params.grid
+      );
+      setBinaryTestSuite(testSuite);
 
       // Trigger download
       const originalName = fileInfo.name.replace(/\.(mid|midi)$/i, '');
@@ -435,6 +463,11 @@ function App() {
               {/* Report Panel */}
               {lastResult?.report && (
                 <ReportPanel report={lastResult.report} verification={verificationResult} tempoInfo={tempoInfo} />
+              )}
+
+              {/* Binary Test Panel */}
+              {binaryTestSuite && (
+                <BinaryTestPanel testSuite={binaryTestSuite} />
               )}
             </div>
           </div>
