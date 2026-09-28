@@ -3,18 +3,27 @@
  * Core quantization engine - time-domain quantization.
  * 
  * Works in seconds (not ticks) to properly handle tempo changes.
- * Grid positions are calculated in seconds based on current tempo.
+ * Grid positions are calculated based on current tempo AND time signature.
  */
 
 import type { GridType, QuantizeParams, GrooveTemplate } from '../types';
 
 /**
- * Calculate grid interval in seconds for a given tempo and grid type.
+ * Calculate grid interval in seconds for a given tempo, grid type, and time signature.
  * 
- * For binary grids: interval = (60 / bpm) * (4 / denominator)
- * For triplet grids: interval = (60 / bpm) * (4 / denominator) * (2/3)
+ * The grid interval represents the rhythmic subdivision:
+ * - 1/4 = quarter note = 1 beat in 4/4
+ * - 1/8 = eighth note = 0.5 beats
+ * - 1/16 = sixteenth note = 0.25 beats
+ * 
+ * Time signature affects how many grid positions fit in a bar,
+ * but the grid interval itself is based on the note value.
  */
-export function getGridIntervalSeconds(bpm: number, grid: GridType): number {
+export function getGridIntervalSeconds(
+  bpm: number,
+  grid: GridType,
+  _timeSignature?: [number, number]
+): number {
   if (bpm <= 0) {
     throw new Error('BPM must be greater than 0');
   }
@@ -34,17 +43,37 @@ export function getGridIntervalSeconds(bpm: number, grid: GridType): number {
     throw new Error(`Invalid grid type: ${grid}`);
   }
 
-  // One whole note = 4/beats in 4/4 = 60/bpm * 4 seconds
-  // Grid interval = whole note / denominator
-  const wholeNoteSeconds = (60 / bpm) * 4;
-  const baseInterval = wholeNoteSeconds / config.denominator;
+  // Beat duration in seconds (one quarter note at given BPM)
+  const beatDuration = 60 / bpm;
+  
+  // Grid interval relative to a beat:
+  // 1/4 = 1 beat
+  // 1/8 = 0.5 beats
+  // 1/16 = 0.25 beats
+  // 1/32 = 0.125 beats
+  const beatsPerGrid = 4 / config.denominator;
+  let interval = beatDuration * beatsPerGrid;
 
   if (config.isTriplet) {
     // Triplet: 3 notes in the space of 2
-    return baseInterval * (2 / 3);
+    interval = interval * (2 / 3);
   }
 
-  return baseInterval;
+  return interval;
+}
+
+/**
+ * Calculate bar duration in seconds.
+ */
+export function getBarDurationSeconds(
+  bpm: number,
+  timeSignature: [number, number]
+): number {
+  const beatDuration = 60 / bpm;
+  // In X/Y time signature, there are X beats per bar, each of duration (4/Y) quarter notes
+  const beatsPerBar = timeSignature[0];
+  const beatUnitRatio = 4 / timeSignature[1]; // e.g., 3/8 has beat unit = 8th note = 0.5 quarter
+  return beatDuration * beatsPerBar * beatUnitRatio;
 }
 
 /**

@@ -18,24 +18,15 @@ export interface QuantizeParams {
   humanizeTicks: number;
 }
 
-/** MIDI Note event */
-export interface MidiNote {
-  midi: number;
-  name: string;
-  octave: number;
-  velocity: number;
-  time: number;
-  duration: number;
-  ticks: number;
-  durationTicks: number;
-}
-
 /** MIDI Track info */
 export interface TrackInfo {
   index: number;
   name: string;
   noteCount: number;
   instrument?: string;
+  channel: number;
+  isMonophonic: boolean;
+  hasChords: boolean;
 }
 
 /** MIDI File info */
@@ -46,6 +37,8 @@ export interface MidiFileInfo {
   tracks: TrackInfo[];
   tempo: number;
   timeSignature: [number, number];
+  tempoChanges: Array<{ time: number; bpm: number }>;
+  timeSignatureChanges: Array<{ time: number; beats: number; beatUnit: number }>;
 }
 
 /** Quantization result */
@@ -54,6 +47,30 @@ export interface QuantizeResult {
   message: string;
   eventsProcessed: number;
   notesQuantized: number;
+  report: QuantizeReport | null;
+}
+
+/** Detailed quantization report */
+export interface QuantizeReport {
+  totalNotes: number;
+  notesMoved: number;
+  notesUnchanged: number;
+  maxDisplacementMs: number;
+  avgDisplacementMs: number;
+  warnings: string[];
+  perTrack: TrackReport[];
+}
+
+/** Per-track report */
+export interface TrackReport {
+  trackIndex: number;
+  trackName: string;
+  notesProcessed: number;
+  notesMoved: number;
+  notesUnchanged: number;
+  maxDisplacementMs: number;
+  avgDisplacementMs: number;
+  warnings: string[];
 }
 
 /** Groove template extracted from a MIDI file */
@@ -62,14 +79,46 @@ export interface GrooveTemplate {
   name: string;
 }
 
-/** Application state */
-export interface AppState {
-  fileLoaded: boolean;
-  fileName: string;
-  midiInfo: MidiFileInfo | null;
-  selectedTrack: number;
-  params: QuantizeParams;
-  status: string;
-  isProcessing: boolean;
-  grooveTemplate: GrooveTemplate | null;
+/** Note snapshot for before/after comparison */
+export interface NoteSnapshot {
+  time: number;
+  duration: number;
+  midi: number;
+  name: string;
+  octave: number;
+  velocity: number;
+  channel: number;
+}
+
+/** Track snapshot for comparison */
+export interface TrackSnapshot {
+  index: number;
+  name: string;
+  notes: NoteSnapshot[];
+  channel: number;
+  instrument?: string;
+}
+
+/** Full MIDI snapshot */
+export interface MidiSnapshot {
+  name: string;
+  ppq: number;
+  duration: number;
+  tempo: number;
+  timeSignature: [number, number];
+  tracks: TrackSnapshot[];
+}
+
+/** Comparison between before and after */
+export interface ComparisonResult {
+  trackIndex: number;
+  trackName: string;
+  totalNotes: number;
+  movedNotes: number;
+  unchangedNotes: number;
+  maxDisplacementMs: number;
+  avgDisplacementMs: number;
+  addedNotes: number;
+  removedNotes: number;
+  warnings: string[];
 }
