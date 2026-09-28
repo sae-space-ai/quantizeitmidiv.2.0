@@ -51,6 +51,19 @@ export function QuantizePanel({
         </button>
       </div>
 
+      {/* Output Tempo Indicator */}
+      <div className="mb-5 p-3 bg-cyan-500/10 border border-cyan-500/30 rounded-lg">
+        <div className="flex items-center gap-2">
+          <div className="w-2 h-2 bg-cyan-400 rounded-full animate-pulse"></div>
+          <span className="text-sm font-medium text-cyan-300">
+            Tempo de salida: {params.outputTempo} BPM constante
+          </span>
+        </div>
+        <p className="text-xs text-gray-400 mt-1">
+          El archivo MIDI resultante tendrá un tempo uniforme de {params.outputTempo} BPM desde el inicio hasta el final.
+        </p>
+      </div>
+
       <div className="space-y-5">
         {/* Grid Selection */}
         <div>

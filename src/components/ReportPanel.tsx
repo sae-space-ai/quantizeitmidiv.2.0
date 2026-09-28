@@ -9,9 +9,10 @@ import type { QuantizeReport } from '../types';
 interface ReportPanelProps {
   report: QuantizeReport;
   verification: string;
+  tempoInfo?: string;
 }
 
-export function ReportPanel({ report, verification }: ReportPanelProps) {
+export function ReportPanel({ report, verification, tempoInfo }: ReportPanelProps) {
   return (
     <div className="bg-gray-800/50 rounded-xl border border-gray-700/50 p-4">
       <div className="flex items-center gap-2 mb-4">
@@ -62,6 +63,16 @@ export function ReportPanel({ report, verification }: ReportPanelProps) {
           <span className={`text-sm ${verification.includes('Valid') ? 'text-green-300' : 'text-red-300'}`}>
             {verification}
           </span>
+        </div>
+      )}
+
+      {/* Tempo Info */}
+      {tempoInfo && (
+        <div className="bg-blue-500/10 border border-blue-500/30 rounded-lg p-3 mb-4">
+          <div className="flex items-center gap-2">
+            <div className="w-2 h-2 bg-blue-400 rounded-full"></div>
+            <span className="text-sm text-blue-300">{tempoInfo}</span>
+          </div>
         </div>
       )}
 

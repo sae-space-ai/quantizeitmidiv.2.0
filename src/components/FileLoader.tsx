@@ -4,8 +4,9 @@
  */
 
 import { useCallback, useRef, useState } from 'react';
-import { Upload, FileAudio, X } from 'lucide-react';
+import { Upload, FileAudio, X, Download } from 'lucide-react';
 import type { MidiFileInfo } from '../types';
+import { downloadTestMidi } from '../utils/test-midi';
 
 interface FileLoaderProps {
   onFileLoad: (file: File) => void;
@@ -100,6 +101,23 @@ export function FileLoader({ onFileLoad, fileInfo, isLoading, onClear }: FileLoa
       <p className="text-gray-500 text-sm">
         Supports .mid and .midi files
       </p>
+
+      {/* Test MIDI Download */}
+      <div className="mt-4 pt-4 border-t border-gray-700/30">
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            downloadTestMidi();
+          }}
+          className="flex items-center gap-2 mx-auto px-4 py-2 bg-blue-500/20 hover:bg-blue-500/30 border border-blue-500/40 text-blue-300 rounded-lg text-sm transition-colors"
+        >
+          <Download className="w-4 h-4" />
+          Download Test MIDI (with tempo changes)
+        </button>
+        <p className="text-xs text-gray-500 mt-2 text-center">
+          Test file with 4 tempo changes: 120 → 90 → 140 → 56 BPM
+        </p>
+      </div>
     </div>
   );
 }

@@ -60,6 +60,7 @@ function App() {
   // Last exported blob for verification
   const [lastBlob, setLastBlob] = useState<Blob | null>(null);
   const [verificationResult, setVerificationResult] = useState<string>('');
+  const [tempoInfo, setTempoInfo] = useState<string>('');
 
   const [params, setParams] = useState<QuantizeParams>({
     ppq: 480,
@@ -70,6 +71,7 @@ function App() {
     quantizeEnds: false,
     preserveVelocity: true,
     humanizeTicks: 0,
+    outputTempo: 56,
   });
 
   const handleFileLoad = useCallback(async (file: File) => {
@@ -134,6 +136,7 @@ function App() {
     setLastResult(null);
     setLastBlob(null);
     setVerificationResult('');
+    setTempoInfo('');
   }, []);
 
   const handleReset = useCallback(() => {
@@ -150,6 +153,7 @@ function App() {
     setLastResult(null);
     setLastBlob(null);
     setVerificationResult('');
+    setTempoInfo('');
 
     setStatus('✓ Reset to original. Ready to quantize again.');
     setStatusType('info');
@@ -211,9 +215,16 @@ function App() {
       // Verify the MIDI
       const verification = await verifyMidiBlob(blob);
       setVerificationResult(verification.message);
+      setTempoInfo(verification.tempoInfo || '');
 
       if (!verification.valid) {
         throw new Error(`MIDI verification failed: ${verification.message}`);
+      }
+
+      // Verify constant tempo
+      if (verification.tempoInfo && !verification.tempoInfo.includes('Single tempo')) {
+        const warning = 'Warning: MIDI does not have a single constant tempo';
+        setTempoInfo(prev => prev + ' - ' + warning);
       }
 
       // Trigger download
@@ -423,7 +434,7 @@ function App() {
 
               {/* Report Panel */}
               {lastResult?.report && (
-                <ReportPanel report={lastResult.report} verification={verificationResult} />
+                <ReportPanel report={lastResult.report} verification={verificationResult} tempoInfo={tempoInfo} />
               )}
             </div>
           </div>

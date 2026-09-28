@@ -1,14 +1,12 @@
 /**
  * QUANTIZE.IT - MIDI Quantizer Pro
- * MIDI file I/O operations using @tonejs/midi.
+ * MIDI file I/O operations with constant output tempo.
  * 
- * Features:
- * - Works in time domain (seconds) to properly handle tempo changes
- * - Preserves channels, instruments, program changes, control changes
- * - Supports multi-track quantization
- * - Generates detailed reports
- * - Verifies MIDI output
- * - Creates snapshots for before/after comparison
+ * Strategy:
+ * 1. Convert note times to grid positions using local BPM
+ * 2. Quantize grid positions
+ * 3. Convert back to time using outputTempo (56 BPM)
+ * 4. Replace all tempos with single outputTempo
  */
 
 import { Midi } from '@tonejs/midi';
@@ -23,10 +21,14 @@ import type {
   GridType,
   MidiSnapshot,
   TrackSnapshot,
-  NoteSnapshot,
   ComparisonResult,
 } from '../types';
-import { getGridIntervalSeconds, quantizeSingleTime, extractGrooveTemplate } from './quantizer';
+import {
+  timeToGridPosition,
+  gridPositionToTime,
+  quantizeGridPositionFull,
+  getGridIntervalSeconds,
+} from './quantizer';
 
 /**
  * Load and parse a MIDI file from a File object.
@@ -35,13 +37,11 @@ export async function loadMidiFile(file: File): Promise<{ midi: Midi; info: Midi
   const arrayBuffer = await file.arrayBuffer();
   const midi = new Midi(arrayBuffer);
 
-  // Extract tempo changes
   const tempoChanges = midi.header.tempos.map(t => ({
     time: t.time ?? 0,
     bpm: t.bpm,
   }));
 
-  // Extract time signature changes
   const timeSignatureChanges = midi.header.timeSignatures.map((ts: any) => ({
     time: ts.time ?? 0,
     beats: ts.timeSignature[0],
@@ -79,7 +79,7 @@ export async function loadMidiFile(file: File): Promise<{ midi: Midi; info: Midi
 }
 
 /**
- * Detect if a track is monophonic (no overlapping notes).
+ * Detect if a track is monophonic.
  */
 function detectMonophonic(notes: Array<{ time: number; duration: number }>): boolean {
   if (notes.length <= 1) return true;
@@ -87,7 +87,7 @@ function detectMonophonic(notes: Array<{ time: number; duration: number }>): boo
   for (let i = 0; i < sorted.length - 1; i++) {
     const currentEnd = sorted[i].time + sorted[i].duration;
     const nextStart = sorted[i + 1].time;
-    if (currentEnd > nextStart + 0.001) { // Small tolerance
+    if (currentEnd > nextStart + 0.001) {
       return false;
     }
   }
@@ -95,7 +95,7 @@ function detectMonophonic(notes: Array<{ time: number; duration: number }>): boo
 }
 
 /**
- * Detect if a track contains chords (simultaneous notes with different pitches).
+ * Detect if a track contains chords.
  */
 function detectChords(notes: Array<{ time: number; midi: number }>): boolean {
   if (notes.length <= 1) return false;
@@ -103,7 +103,6 @@ function detectChords(notes: Array<{ time: number; midi: number }>): boolean {
   for (let i = 0; i < sorted.length - 1; i++) {
     const currentTime = sorted[i].time;
     const nextTime = sorted[i + 1].time;
-    // If two notes start within 10ms and have different pitches, it's a chord
     if (Math.abs(currentTime - nextTime) < 0.01 && sorted[i].midi !== sorted[i + 1].midi) {
       return true;
     }
@@ -145,7 +144,7 @@ function getTimeSignatureAtTime(midi: Midi, time: number): [number, number] {
 }
 
 /**
- * Create a snapshot of the current MIDI state for comparison.
+ * Create a snapshot of the current MIDI state.
  */
 export function createMidiSnapshot(midi: Midi, name: string): MidiSnapshot {
   const tracks: TrackSnapshot[] = midi.tracks.map((track, index) => ({
@@ -177,7 +176,7 @@ export function createMidiSnapshot(midi: Midi, name: string): MidiSnapshot {
 }
 
 /**
- * Compare two MIDI snapshots and generate a comparison result.
+ * Compare two MIDI snapshots.
  */
 export function compareSnapshots(
   before: MidiSnapshot,
@@ -211,7 +210,6 @@ export function compareSnapshots(
   let maxDisplacement = 0;
   const warnings: string[] = [];
 
-  // Match notes by pitch and find closest time match
   const matchedAfter = new Set<number>();
 
   for (const beforeNote of beforeNotes) {
@@ -229,11 +227,11 @@ export function compareSnapshots(
       }
     }
 
-    if (bestMatch >= 0 && bestDistance < 0.5) { // Within 500ms is a match
+    if (bestMatch >= 0 && bestDistance < 0.5) {
       matchedAfter.add(bestMatch);
       const displacementMs = Math.abs(afterNotes[bestMatch].time - beforeNote.time) * 1000;
 
-      if (displacementMs > 1) { // Moved more than 1ms
+      if (displacementMs > 1) {
         movedNotes++;
         totalDisplacement += displacementMs;
         maxDisplacement = Math.max(maxDisplacement, displacementMs);
@@ -259,13 +257,18 @@ export function compareSnapshots(
     avgDisplacementMs: Math.round(avgDisplacement * 100) / 100,
     addedNotes,
     removedNotes: beforeNotes.length - (movedNotes + unchangedNotes),
-    warnings: warnings.slice(0, 10), // Limit warnings
+    warnings: warnings.slice(0, 10),
   };
 }
 
 /**
- * Quantize a MIDI file with the given parameters.
- * Supports quantizing multiple tracks.
+ * Quantize a MIDI file with constant output tempo.
+ * 
+ * Strategy:
+ * 1. Convert each note time to grid position using local BPM
+ * 2. Quantize the grid position
+ * 3. Convert quantized position back to time using outputTempo
+ * 4. Replace all tempos with single outputTempo
  */
 export function quantizeMidi(
   midi: Midi,
@@ -278,6 +281,7 @@ export function quantizeMidi(
       throw new Error('No tracks selected for quantization');
     }
 
+    const outputTempo = params.outputTempo || 56;
     let totalNotesQuantized = 0;
     let totalEventsProcessed = 0;
     const perTrackReports: TrackReport[] = [];
@@ -298,16 +302,25 @@ export function quantizeMidi(
         continue;
       }
 
-      const trackReport = quantizeTrack(midi, track, trackIndex, params, groove);
+      const trackReport = quantizeTrack(midi, track, trackIndex, params, groove, outputTempo);
       perTrackReports.push(trackReport);
 
-      totalNotesQuantized += trackReport.notesMoved * 2; // start + end
+      totalNotesQuantized += trackReport.notesMoved * 2;
       totalEventsProcessed += trackReport.notesProcessed * 2;
       globalMaxDisplacement = Math.max(globalMaxDisplacement, trackReport.maxDisplacementMs);
       globalTotalDisplacement += trackReport.notesMoved * trackReport.avgDisplacementMs;
       globalMovedNotes += trackReport.notesMoved;
       allWarnings.push(...trackReport.warnings);
     }
+
+    // Replace all tempos with single outputTempo at time 0
+    midi.header.tempos = [];
+    midi.header.tempos.push({
+      bpm: outputTempo,
+      time: 0,
+    } as any);
+
+    allWarnings.push(`Tempo set to ${outputTempo} BPM constant`);
 
     const report: QuantizeReport = {
       totalNotes: totalEventsProcessed / 2,
@@ -323,7 +336,7 @@ export function quantizeMidi(
 
     return {
       success: true,
-      message: `Quantized ${trackIndices.length} track(s), ${globalMovedNotes} notes moved`,
+      message: `Quantized ${trackIndices.length} track(s), ${globalMovedNotes} notes moved. Output tempo: ${outputTempo} BPM`,
       eventsProcessed: totalEventsProcessed,
       notesQuantized: totalNotesQuantized,
       report,
@@ -340,14 +353,15 @@ export function quantizeMidi(
 }
 
 /**
- * Quantize a single track.
+ * Quantize a single track using grid position strategy.
  */
 function quantizeTrack(
   midi: Midi,
   track: any,
   trackIndex: number,
   params: QuantizeParams,
-  groove: GrooveTemplate | null
+  groove: GrooveTemplate | null,
+  outputTempo: number
 ): TrackReport {
   const isMono = detectMonophonic(track.notes);
   const notesProcessed = track.notes.length;
@@ -369,18 +383,28 @@ function quantizeTrack(
 
   for (const note of track.notes) {
     const originalTime = note.time;
+    const originalEndTime = note.time + note.duration;
 
-    // Get BPM and time signature at note start time
-    const bpm = getBpmAtTime(midi, note.time);
-    const timeSig = getTimeSignatureAtTime(midi, note.time);
-    const gridInterval = getGridIntervalSeconds(bpm, params.grid, timeSig);
+    // Get BPM at note start and end times
+    const bpmStart = getBpmAtTime(midi, note.time);
+    const bpmEnd = getBpmAtTime(midi, originalEndTime);
+    const timeSigStart = getTimeSignatureAtTime(midi, note.time);
+    const timeSigEnd = getTimeSignatureAtTime(midi, originalEndTime);
 
     let newTime = note.time;
     let newDuration = note.duration;
 
     // Quantize start time
     if (params.quantizeStarts) {
-      newTime = quantizeSingleTime(note.time, gridInterval, params, groove);
+      // Convert to grid position using local BPM
+      const startPos = timeToGridPosition(note.time, bpmStart, params.grid);
+      
+      // Quantize the position
+      const quantizedPos = quantizeGridPositionFull(startPos, params, groove);
+      
+      // Convert back to time using outputTempo
+      newTime = gridPositionToTime(quantizedPos, outputTempo, params.grid);
+      
       const displacementMs = Math.abs(newTime - originalTime) * 1000;
       if (displacementMs > 1) {
         notesMoved++;
@@ -391,14 +415,15 @@ function quantizeTrack(
 
     // Quantize end time
     if (params.quantizeEnds) {
-      const endTime = note.time + note.duration;
-      const bpmEnd = getBpmAtTime(midi, endTime);
-      const timeSigEnd = getTimeSignatureAtTime(midi, endTime);
-      const gridIntervalEnd = getGridIntervalSeconds(bpmEnd, params.grid, timeSigEnd);
-      const newEndTime = quantizeSingleTime(endTime, gridIntervalEnd, params, groove);
+      const endPos = timeToGridPosition(originalEndTime, bpmEnd, params.grid);
+      const quantizedEndPos = quantizeGridPositionFull(endPos, params, groove);
+      const newEndTime = gridPositionToTime(quantizedEndPos, outputTempo, params.grid);
       newDuration = Math.max(0.001, newEndTime - newTime);
     } else {
-      newDuration = note.duration;
+      // Preserve original duration but scale it to outputTempo
+      // Calculate duration in grid units, then convert to outputTempo time
+      const durationGridUnits = note.duration / getGridIntervalSeconds(bpmStart, params.grid, timeSigStart);
+      newDuration = durationGridUnits * getGridIntervalSeconds(outputTempo, params.grid);
     }
 
     quantizedNotes.push({
@@ -426,7 +451,7 @@ function quantizeTrack(
     }
   }
 
-  // Clear and re-add notes (preserving channel and instrument)
+  // Clear and re-add notes
   track.notes = [];
   for (const note of quantizedNotes) {
     track.addNote({
@@ -465,15 +490,13 @@ export function exportMidiBlob(midi: Midi): Blob {
 }
 
 /**
- * Verify a MIDI blob by re-reading it.
- * Returns true if the MIDI is valid and readable.
+ * Verify a MIDI blob and check for constant tempo.
  */
-export async function verifyMidiBlob(blob: Blob): Promise<{ valid: boolean; message: string }> {
+export async function verifyMidiBlob(blob: Blob): Promise<{ valid: boolean; message: string; tempoInfo?: string }> {
   try {
     const arrayBuffer = await blob.arrayBuffer();
     const midi = new Midi(arrayBuffer);
 
-    // Basic validation
     if (midi.tracks.length === 0) {
       return { valid: false, message: 'MIDI has no tracks' };
     }
@@ -495,9 +518,22 @@ export async function verifyMidiBlob(blob: Blob): Promise<{ valid: boolean; mess
       }
     }
 
+    // Check tempo
+    let tempoInfo = '';
+    if (midi.header.tempos.length === 0) {
+      tempoInfo = 'No tempo events found (default 120 BPM)';
+    } else if (midi.header.tempos.length === 1) {
+      const tempo = midi.header.tempos[0];
+      tempoInfo = `Single tempo: ${tempo.bpm} BPM at ${(tempo.time ?? 0).toFixed(2)}s`;
+    } else {
+      const tempos = midi.header.tempos.map(t => `${t.bpm} BPM`).join(', ');
+      tempoInfo = `Multiple tempos detected: ${tempos}`;
+    }
+
     return {
       valid: true,
       message: `Valid MIDI: ${midi.tracks.length} tracks, ${totalNotes} notes, ${midi.duration.toFixed(1)}s`,
+      tempoInfo,
     };
   } catch (error) {
     return {
@@ -508,27 +544,7 @@ export async function verifyMidiBlob(blob: Blob): Promise<{ valid: boolean; mess
 }
 
 /**
- * Extract groove template from a MIDI file.
- */
-export function extractGrooveFromMidi(
-  midi: Midi,
-  trackIndex: number,
-  grid: GridType,
-  _ppq: number
-): GrooveTemplate {
-  const track = midi.tracks[trackIndex];
-  if (!track || track.notes.length === 0) {
-    throw new Error('No notes found in selected track');
-  }
-
-  const bpm = midi.header.tempos.length > 0 ? midi.header.tempos[0].bpm : 120;
-  const noteTimes = track.notes.map(note => note.time);
-
-  return extractGrooveTemplate(noteTimes, bpm, grid, 'Extracted from MIDI');
-}
-
-/**
- * Generate a text report from a QuantizeReport.
+ * Generate a text report.
  */
 export function generateTextReport(report: QuantizeReport, fileName: string): string {
   const lines: string[] = [];

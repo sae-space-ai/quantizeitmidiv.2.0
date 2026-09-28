@@ -16,6 +16,7 @@ export interface QuantizeParams {
   quantizeEnds: boolean;
   preserveVelocity: boolean;
   humanizeTicks: number;
+  outputTempo: number;    // BPM constante para el archivo de salida
 }
 
 /** MIDI Track info */

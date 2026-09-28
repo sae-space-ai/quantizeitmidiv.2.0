@@ -1,23 +1,18 @@
 /**
  * QUANTIZE.IT - MIDI Quantizer Pro
- * Core quantization engine - time-domain quantization.
+ * Core quantization engine - grid position-based quantization.
  * 
- * Works in seconds (not ticks) to properly handle tempo changes.
- * Grid positions are calculated based on current tempo AND time signature.
+ * Strategy:
+ * 1. Convert note times to grid positions using local BPM
+ * 2. Quantize grid positions (round, strength, swing, humanize)
+ * 3. Convert quantized positions back to time using outputTempo
+ * 4. Output file has constant outputTempo (default 56 BPM)
  */
 
 import type { GridType, QuantizeParams, GrooveTemplate } from '../types';
 
 /**
- * Calculate grid interval in seconds for a given tempo, grid type, and time signature.
- * 
- * The grid interval represents the rhythmic subdivision:
- * - 1/4 = quarter note = 1 beat in 4/4
- * - 1/8 = eighth note = 0.5 beats
- * - 1/16 = sixteenth note = 0.25 beats
- * 
- * Time signature affects how many grid positions fit in a bar,
- * but the grid interval itself is based on the note value.
+ * Calculate grid interval in seconds for a given tempo and grid type.
  */
 export function getGridIntervalSeconds(
   bpm: number,
@@ -43,19 +38,11 @@ export function getGridIntervalSeconds(
     throw new Error(`Invalid grid type: ${grid}`);
   }
 
-  // Beat duration in seconds (one quarter note at given BPM)
   const beatDuration = 60 / bpm;
-  
-  // Grid interval relative to a beat:
-  // 1/4 = 1 beat
-  // 1/8 = 0.5 beats
-  // 1/16 = 0.25 beats
-  // 1/32 = 0.125 beats
   const beatsPerGrid = 4 / config.denominator;
   let interval = beatDuration * beatsPerGrid;
 
   if (config.isTriplet) {
-    // Triplet: 3 notes in the space of 2
     interval = interval * (2 / 3);
   }
 
@@ -63,149 +50,131 @@ export function getGridIntervalSeconds(
 }
 
 /**
- * Calculate bar duration in seconds.
+ * Convert a time (in seconds) to a grid position (number of grid intervals from start).
+ * Uses the BPM at that time to calculate the correct grid interval.
  */
-export function getBarDurationSeconds(
+export function timeToGridPosition(
+  time: number,
   bpm: number,
-  timeSignature: [number, number]
+  grid: GridType
 ): number {
-  const beatDuration = 60 / bpm;
-  // In X/Y time signature, there are X beats per bar, each of duration (4/Y) quarter notes
-  const beatsPerBar = timeSignature[0];
-  const beatUnitRatio = 4 / timeSignature[1]; // e.g., 3/8 has beat unit = 8th note = 0.5 quarter
-  return beatDuration * beatsPerBar * beatUnitRatio;
+  const gridInterval = getGridIntervalSeconds(bpm, grid);
+  return time / gridInterval;
 }
 
 /**
- * Quantize a time value to the nearest grid position.
- * Uses Math.round for proper rounding.
+ * Convert a grid position back to time (in seconds) using the output tempo.
  */
-export function quantizeTime(time: number, gridInterval: number): number {
-  if (gridInterval <= 0) {
-    throw new Error('Grid interval must be greater than 0');
-  }
-  return Math.round(time / gridInterval) * gridInterval;
+export function gridPositionToTime(
+  position: number,
+  outputBpm: number,
+  grid: GridType
+): number {
+  const gridInterval = getGridIntervalSeconds(outputBpm, grid);
+  return position * gridInterval;
 }
 
 /**
- * Apply strength to the quantization.
- * strength=0: no quantization (original time)
- * strength=100: full quantization
- * Formula: final = time + (quantized - time) * (strength / 100)
+ * Quantize a grid position to the nearest integer.
  */
-export function applyStrength(original: number, quantized: number, strength: number): number {
+export function quantizeGridPosition(position: number): number {
+  return Math.round(position);
+}
+
+/**
+ * Apply strength to a grid position.
+ * strength=0: no quantization (original position)
+ * strength=100: full quantization (integer position)
+ */
+export function applyStrengthToPosition(
+  originalPos: number,
+  quantizedPos: number,
+  strength: number
+): number {
   const clampedStrength = Math.max(0, Math.min(100, strength));
-  return original + (quantized - original) * (clampedStrength / 100);
+  return originalPos + (quantizedPos - originalPos) * (clampedStrength / 100);
 }
 
 /**
- * Apply swing to odd subdivisions.
- * Swing delays every other grid position.
+ * Apply swing to a grid position.
+ * Swing delays odd positions.
  */
-export function applySwing(time: number, gridInterval: number, swing: number): number {
-  if (swing === 0) return time;
+export function applySwingToPosition(position: number, swing: number): number {
+  if (swing === 0) return position;
 
   const clampedSwing = Math.max(0, Math.min(100, swing));
-  const position = Math.round(time / gridInterval);
-  const isOdd = position % 2 !== 0;
+  const intPos = Math.round(position);
+  const isOdd = intPos % 2 !== 0;
 
   if (isOdd) {
-    // Swing offset: delays the odd position by a fraction of the grid interval
-    const swingOffset = (clampedSwing / 100) * (gridInterval / 3);
-    return time + swingOffset;
+    // Swing offset: delays the odd position by 1/3 of a grid interval
+    const swingOffset = (clampedSwing / 100) * (1 / 3);
+    return position + swingOffset;
   }
 
-  return time;
+  return position;
 }
 
 /**
- * Apply humanization - random offset within range.
- * Ensures time doesn't go negative.
+ * Apply humanization to a grid position.
+ * Adds random offset within range (in grid units).
  */
-export function applyHumanize(time: number, humanizeMs: number): number {
-  if (humanizeMs <= 0) return time;
+export function applyHumanizeToPosition(position: number, humanizeTicks: number): number {
+  if (humanizeTicks <= 0) return position;
 
-  const offsetMs = (Math.random() * 2 - 1) * humanizeMs;
-  const offsetSec = offsetMs / 1000; // Convert ms to seconds
-  return Math.max(0, time + offsetSec);
+  // Convert ticks to grid units (assuming 480 PPQ, 1/16 grid = 120 ticks)
+  const ticksPerGrid = 120;
+  const humanizeGridUnits = humanizeTicks / ticksPerGrid;
+  
+  const offset = (Math.random() * 2 - 1) * humanizeGridUnits;
+  return Math.max(0, position + offset);
 }
 
 /**
- * Apply groove template offsets.
+ * Apply groove template to a grid position.
  */
-export function applyGroove(time: number, gridInterval: number, groove: GrooveTemplate): number {
-  if (!groove.offsets || groove.offsets.length === 0) return time;
+export function applyGrooveToPosition(
+  position: number,
+  groove: GrooveTemplate
+): number {
+  if (!groove.offsets || groove.offsets.length === 0) return position;
 
-  const position = Math.round(time / gridInterval);
-  const grooveIndex = ((position % groove.offsets.length) + groove.offsets.length) % groove.offsets.length;
+  const intPos = Math.round(position);
+  const grooveIndex = ((intPos % groove.offsets.length) + groove.offsets.length) % groove.offsets.length;
   const offsetMs = groove.offsets[grooveIndex];
-  const offsetSec = offsetMs / 1000;
-
-  return Math.max(0, time + offsetSec);
+  
+  // Convert ms offset to grid units (assuming 120 BPM, 1/16 grid)
+  const gridIntervalMs = (60 / 120) * (4 / 16) * 1000; // 125ms at 120 BPM
+  const offsetGridUnits = offsetMs / gridIntervalMs;
+  
+  return Math.max(0, position + offsetGridUnits);
 }
 
 /**
- * Extract groove template from note times.
- * Analyzes timing offsets from the grid.
+ * Full quantization pipeline for a grid position.
  */
-export function extractGrooveTemplate(
-  noteTimes: number[],
-  bpm: number,
-  grid: GridType,
-  name: string = 'Extracted Groove'
-): GrooveTemplate {
-  const gridInterval = getGridIntervalSeconds(bpm, grid);
-  const offsets: number[] = new Array(16).fill(0);
-  const counts: number[] = new Array(16).fill(0);
-
-  for (const time of noteTimes) {
-    const quantized = quantizeTime(time, gridInterval);
-    const offsetMs = (time - quantized) * 1000; // Store in ms
-    const position = Math.round(quantized / gridInterval);
-    const index = ((position % 16) + 16) % 16;
-
-    offsets[index] += offsetMs;
-    counts[index]++;
-  }
-
-  // Average offsets
-  for (let i = 0; i < 16; i++) {
-    if (counts[i] > 0) {
-      offsets[i] = Math.round(offsets[i] / counts[i]);
-    }
-  }
-
-  return { offsets, name };
-}
-
-/**
- * Full quantization pipeline for a single time value.
- */
-export function quantizeSingleTime(
-  time: number,
-  gridInterval: number,
+export function quantizeGridPositionFull(
+  originalPos: number,
   params: QuantizeParams,
   groove: GrooveTemplate | null
 ): number {
-  // Step 1: Quantize to grid
-  let result = quantizeTime(time, gridInterval);
+  // Step 1: Quantize to nearest integer position
+  let result = quantizeGridPosition(originalPos);
 
   // Step 2: Apply strength
-  result = applyStrength(time, result, params.strength);
+  result = applyStrengthToPosition(originalPos, result, params.strength);
 
   // Step 3: Apply groove template
   if (groove) {
-    result = applyGroove(result, gridInterval, groove);
+    result = applyGrooveToPosition(result, groove);
   }
 
   // Step 4: Apply swing
-  result = applySwing(result, gridInterval, params.swing);
+  result = applySwingToPosition(result, params.swing);
 
   // Step 5: Apply humanize
   if (params.humanizeTicks > 0) {
-    // Convert ticks to approximate ms (assuming 480 PPQ at 120 BPM)
-    const humanizeMs = params.humanizeTicks * (1000 / 480);
-    result = applyHumanize(result, humanizeMs);
+    result = applyHumanizeToPosition(result, params.humanizeTicks);
   }
 
   // Ensure non-negative
