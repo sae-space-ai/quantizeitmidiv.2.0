@@ -14,6 +14,7 @@
 import { useState, useCallback, useRef } from 'react';
 import { Music, FileAudio, Download, AlertTriangle, Info, Wand2, FileCode } from 'lucide-react';
 import { AudioLoader } from './AudioLoader';
+import { PlaybackControls } from './PlaybackControls';
 import {
   type AudioFileInfo,
   type WaveformData,
@@ -30,6 +31,7 @@ import {
   validateMusicXmlEnhanced as validateMusicXml,
   type MusicXmlParams,
 } from '../utils/musicxml-enhanced';
+import { useUnifiedPlayback } from '../hooks/useUnifiedPlayback';
 import { Midi } from '@tonejs/midi';
 
 interface AudioTranscriptionPanelProps {
@@ -69,6 +71,15 @@ export function AudioTranscriptionPanel({ onStatusChange }: AudioTranscriptionPa
 
   // Piano roll state (basic)
   const [selectedNoteIndex, setSelectedNoteIndex] = useState<number | null>(null);
+
+  // Unified playback
+  const playback = useUnifiedPlayback({
+    audioBuffer,
+    transcribedNotes: transcription?.notes || null,
+    editedNotes,
+  });
+
+  const playbackState = playback.getState();
 
   const handleAudioLoad = useCallback((info: AudioFileInfo, waveform: WaveformData, buffer: AudioBuffer) => {
     setAudioInfo(info);
@@ -240,6 +251,21 @@ export function AudioTranscriptionPanel({ onStatusChange }: AudioTranscriptionPa
           selectionEnd={selectionEnd}
           onSelectionChange={handleSelectionChange}
         />
+        
+        {/* Audio playback controls */}
+        {audioBuffer && (
+          <div className="mt-3">
+            <PlaybackControls
+              state={playbackState}
+              onPlay={() => playback.play('audio-original')}
+              onPause={playback.pause}
+              onStop={playback.stop}
+              onSeek={playback.seek}
+              onToggleLoop={() => playback.setLoop(!playbackState.loopEnabled)}
+              contextLabel="Original Audio"
+            />
+          </div>
+        )}
       </div>
 
       {audioInfo && (
@@ -321,6 +347,30 @@ export function AudioTranscriptionPanel({ onStatusChange }: AudioTranscriptionPa
                   {editedNotes.filter(n => n.source === 'user').length} edited by user
                 </span>
               </h3>
+
+              {/* Transcription playback controls */}
+              <div className="mb-3 space-y-2">
+                <PlaybackControls
+                  state={playbackState}
+                  onPlay={() => playback.play('transcription')}
+                  onPause={playback.pause}
+                  onStop={playback.stop}
+                  onSeek={playback.seek}
+                  onToggleLoop={() => playback.setLoop(!playbackState.loopEnabled)}
+                  contextLabel="Transcription (estimated)"
+                />
+                {editedNotes !== transcription?.notes && (
+                  <PlaybackControls
+                    state={playbackState}
+                    onPlay={() => playback.play('edition')}
+                    onPause={playback.pause}
+                    onStop={playback.stop}
+                    onSeek={playback.seek}
+                    onToggleLoop={() => playback.setLoop(!playbackState.loopEnabled)}
+                    contextLabel="Edited Version"
+                  />
+                )}
+              </div>
 
               {transcription?.warnings && transcription.warnings.length > 0 && (
                 <div className="mb-2 p-2 bg-yellow-500/10 border border-yellow-500/30 rounded text-xs text-yellow-300">
